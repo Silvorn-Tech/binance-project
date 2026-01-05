@@ -124,14 +124,7 @@ class Binance:
     # Trade validation
     # =========================
 
-    def can_trade(self, symbol: str, qty: float) -> tuple[bool, str]:
-        """
-        Validate whether a trade can be executed for a given symbol and quantity.
-
-        Checks:
-        - LOT_SIZE
-        - MIN_NOTIONAL / NOTIONAL (fallback to MIN_TRADE_USDT)
-        """
+    def can_trade(self, symbol: str, qty: float, enforce_user_min: bool = False) -> tuple[bool, str]:
         symbol = symbol.upper()
 
         if qty <= 0:
@@ -141,33 +134,53 @@ class Binance:
         if adjusted_qty <= 0:
             return False, "Quantity too small after LOT_SIZE adjustment"
 
-        price = self.get_price(symbol)
+        price = float(self._client.get_symbol_ticker(symbol=symbol)["price"])
         notional = adjusted_qty * price
 
         min_exchange = self._get_min_notional(symbol)
-        min_required = max(min_exchange, self.MIN_TRADE_USDT)
+
+        # IMPORTANT:
+        # - For SELL/STOP orders you should NOT force your internal MIN_TRADE_USDT
+        # - Only enforce it when you explicitly want it (e.g., on BUY decisions)
+        min_required = max(min_exchange, self.MIN_TRADE_USDT) if enforce_user_min else min_exchange
 
         if notional < min_required:
             return False, f"Notional too small ({notional:.8f} < {min_required})"
 
         return True, ""
 
-    def _require_tradeable_qty(self, symbol: str, qty: float, context: str) -> str:
+
+    def _require_tradeable_qty(
+        self,
+        symbol: str,
+        qty: float,
+        context: str,
+        ignore_min_trade: bool = False,
+    ) -> str:
         """
-        Centralize: can_trade + adjust qty + formatting.
-        Returns qty_str ready for create_order.
+        Validate, adjust and format quantity for trading.
+
+        - ignore_min_trade=True  -> only Binance rules (LOT_SIZE + NOTIONAL)
+        - ignore_min_trade=False -> Binance rules + user MIN_TRADE_USDT
         """
         symbol = symbol.upper()
 
-        ok, reason = self.can_trade(symbol, qty)
+        ok, reason = self.can_trade(
+            symbol,
+            qty,
+            enforce_user_min=not ignore_min_trade
+        )
         if not ok:
             raise ValueError(f"{context} skipped: {reason}")
 
         adjusted_qty = self._adjust_qty(symbol, qty)
         if adjusted_qty <= 0.0:
-            raise ValueError(f"{context} skipped: Quantity too small after LOT_SIZE adjustment")
+            raise ValueError(
+                f"{context} skipped: Quantity too small after LOT_SIZE adjustment"
+            )
 
         return f"{adjusted_qty:.8f}"
+
 
     # =========================
     # Trading
@@ -208,7 +221,13 @@ class Binance:
         price = self.get_price(symbol)
         raw_qty = usdt / price
 
-        qty_str = self._require_tradeable_qty(symbol, raw_qty, context="Sell")
+        qty_str = self._require_tradeable_qty(
+            symbol,
+            raw_qty,
+            context="Sell",
+            ignore_min_trade=True
+        )
+
         logger.info(f"SELL | symbol={symbol} | qty={qty_str}")
 
         order = self._client.create_order(
@@ -227,17 +246,27 @@ class Binance:
     def sell_all(self, symbol: str) -> dict:
         """
         Sell ALL free base asset balance (market).
+        Uses only Binance exchange rules (LOT_SIZE + NOTIONAL).
         """
         symbol = symbol.upper()
         base_asset = self._get_base_asset(symbol)
 
+        # 1. Get real free balance (auto-sync with app trades)
         qty = self.get_asset_free(base_asset)
         if qty <= 0.0:
             raise ValueError(f"No free balance to sell for {base_asset}")
 
-        qty_str = self._require_tradeable_qty(symbol, qty, context="Sell all")
+        # 2. Validate & adjust quantity using exchange filters only
+        qty_str = self._require_tradeable_qty(
+            symbol,
+            qty,
+            context="Sell all",
+            ignore_min_trade=True  # 🔑 KEY CHANGE
+        )
+
         logger.info(f"SELL ALL | symbol={symbol} | qty={qty_str}")
 
+        # 3. Market sell
         order = self._client.create_order(
             symbol=symbol,
             side="SELL",
@@ -249,7 +278,9 @@ class Binance:
             f"SELL ALL FILLED | sold={order.get('executedQty')} | "
             f"received={order.get('cummulativeQuoteQty')} USDT"
         )
+
         return order
+
 
     def safe_sell_all(self, symbol: str) -> dict | None:
         """
@@ -269,23 +300,34 @@ class Binance:
         """
         Place a STOP_LOSS_LIMIT order for ALL available base asset.
         Prices are adjusted to tickSize.
+        Uses ONLY Binance exchange rules (not MIN_TRADE_USDT).
         """
         symbol = symbol.upper()
         base_asset = self._get_base_asset(symbol)
 
+        # 1. Get real free balance (auto-syncs with manual app trades)
         qty = self.get_asset_free(base_asset)
         if qty <= 0.0:
             raise ValueError(f"No free balance to protect for {base_asset}")
 
-        qty_str = self._require_tradeable_qty(symbol, qty, context="Stop loss")
+        # 2. Validate quantity using exchange rules only
+        qty_str = self._require_tradeable_qty(
+            symbol,
+            qty,
+            context="Stop loss",
+            ignore_min_trade=True  # 🔑 KEY CHANGE
+        )
 
+        # 3. Adjust prices to tickSize
         stop_adj = self._adjust_price(symbol, stop_price)
         limit_adj = self._adjust_price(symbol, limit_price)
 
         logger.info(
-            f"PLACING STOP LOSS | {symbol} | qty={qty_str} | stop={stop_adj} | limit={limit_adj}"
+            f"PLACING STOP LOSS | {symbol} | "
+            f"qty={qty_str} | stop={stop_adj} | limit={limit_adj}"
         )
 
+        # 4. Place STOP_LOSS_LIMIT order
         order = self._client.create_order(
             symbol=symbol,
             side="SELL",
@@ -299,7 +341,9 @@ class Binance:
         logger.success(
             f"STOP LOSS PLACED | qty={qty_str} | stop={stop_adj} | limit={limit_adj}"
         )
+
         return order
+
 
     def safe_stop_loss_pct(self, symbol: str, stop_pct: float = 0.01, limit_pct: float = 0.011) -> dict | None:
         """
@@ -317,23 +361,23 @@ class Binance:
 
         current = self.get_price(symbol)
 
-        ok, reason = self.can_trade(symbol, qty)
-        if not ok:
-            logger.warning(f"STOP LOSS skipped: {reason}")
+        try:
+            qty_str = self._require_tradeable_qty(
+                symbol,
+                qty,
+                context="Safe stop loss",
+                ignore_min_trade=True
+            )
+        except ValueError as e:
+            logger.warning(str(e))
             return None
+
 
         stop_price = current * (1 - stop_pct)
         limit_price = current * (1 - limit_pct)
 
         stop_adj = self._adjust_price(symbol, stop_price)
         limit_adj = self._adjust_price(symbol, limit_price)
-
-        qty_adj = self._adjust_qty(symbol, qty)
-        if qty_adj <= 0:
-            logger.warning("STOP LOSS skipped: Quantity too small after LOT_SIZE adjustment")
-            return None
-
-        qty_str = f"{qty_adj:.8f}"
 
         logger.info(
             f"STOP LOSS | {symbol} | qty={qty_str} | current={current:.2f} | "
@@ -375,7 +419,13 @@ class Binance:
         if bnb_qty <= 0.0:
             raise ValueError("No free BNB to convert")
 
-        qty_str = self._require_tradeable_qty(symbol, bnb_qty, context="BNB to BTC")
+        qty_str = self._require_tradeable_qty(
+            symbol,
+            bnb_qty,
+            context="BNB to BTC",
+            ignore_min_trade=True
+        )
+
         logger.info(f"BNB → BTC | qty={qty_str}")
 
         order = self._client.create_order(
@@ -402,6 +452,37 @@ class Binance:
             on_sell(reason, order, extra)
         except Exception as e:
             logger.warning(f"on_sell callback failed: {e}")
+
+    def is_price_overextended(
+        self,
+        symbol: str,
+        interval: str = "15m",
+        limit: int = 100,
+        sma_period: int = 50,
+        max_deviation_pct: float = 0.02,  # 2%
+    ) -> bool:
+        """
+        Returns True if price is too far ABOVE SMA (overextended).
+        """
+        klines = self.get_klines(symbol=symbol, interval=interval, limit=limit)
+        closes = [float(k[4]) for k in klines]
+
+        if len(closes) < sma_period:
+            return False
+
+        sma_val = sum(closes[-sma_period:]) / sma_period
+        current = closes[-1]
+
+        deviation = (current - sma_val) / sma_val
+
+        logger.info(
+            f"OVEREXT CHECK | {symbol} | price={current:.2f} | "
+            f"SMA{sma_period}={sma_val:.2f} | dev={deviation*100:.2f}%"
+        )
+
+        return deviation > max_deviation_pct
+
+
 
     def trailing_stop_sell_all_pct(
         self,
@@ -445,37 +526,51 @@ class Binance:
 
             current = self.get_price(symbol)
 
+            # Update max price
             if current > max_price * (1 + new_high_epsilon_pct):
                 max_price = current
                 last_new_high_ts = now
                 logger.info(f"NEW HIGH | {symbol} | max_price={max_price:.2f}")
 
-            # Respect minimum hold time
             if (now - start_ts) < min_hold_seconds:
                 time.sleep(poll_seconds)
                 continue
 
-            # 1) Time stop (no meaningful new highs for too long)
+            # 1) TIME STOP — purely time-based
             if (now - last_new_high_ts) >= max_hold_seconds_without_new_high:
                 logger.warning(
                     f"TIME STOP TRIGGER | {symbol} | "
-                    f"no_new_high_for={(now - last_new_high_ts):.0f}s | current={current:.2f} | max={max_price:.2f}"
+                    f"no_new_high_for={(now - last_new_high_ts):.0f}s | "
+                    f"current={current:.2f} | max={max_price:.2f}"
                 )
-                ok, reason = self.can_trade(symbol, qty)
-                if ok:
-                    order = self.safe_sell_all(symbol)
-                    if order:
-                        self._emit_sell(
-                            "TIME_STOP",
-                            order,
-                            {"current": current, "max_price": max_price, "no_new_high_for_s": now - last_new_high_ts},
-                            on_sell=on_sell,
-                        )
-                        return order
-                else:
-                    logger.warning(f"SELL skipped (not tradeable): {reason}")
 
-            # 2) Trend exit (price below slow SMA)
+                try:
+                    self._require_tradeable_qty(
+                        symbol,
+                        qty,
+                        context="Time stop sell",
+                        ignore_min_trade=True
+                    )
+                except ValueError as e:
+                    logger.warning(str(e))
+                    time.sleep(poll_seconds)
+                    continue
+
+                order = self.safe_sell_all(symbol)
+                if order:
+                    self._emit_sell(
+                        "TIME_STOP",
+                        order,
+                        {
+                            "current": current,
+                            "max_price": max_price,
+                            "no_new_high_for_s": now - last_new_high_ts,
+                        },
+                        on_sell=on_sell,
+                    )
+                    return order
+
+            # 2) TREND EXIT — SMA based
             if trend_exit_enabled:
                 try:
                     sma_slow = self.get_sma(
@@ -484,37 +579,60 @@ class Binance:
                         limit=trend_limit,
                         period=trend_sma_period,
                     )
+
                     if current < sma_slow:
                         logger.warning(
-                            f"TREND EXIT TRIGGER | {symbol} | current={current:.2f} < SMA{trend_sma_period}={sma_slow:.2f}"
+                            f"TREND EXIT TRIGGER | {symbol} | "
+                            f"current={current:.2f} < SMA{trend_sma_period}={sma_slow:.2f}"
                         )
-                        ok, reason = self.can_trade(symbol, qty)
-                        if ok:
-                            order = self.safe_sell_all(symbol)
-                            if order:
-                                self._emit_sell(
-                                    "TREND_EXIT",
-                                    order,
-                                    {"current": current, "sma": sma_slow, "max_price": max_price},
-                                    on_sell=on_sell,
-                                )
-                                return order
-                        else:
-                            logger.warning(f"SELL skipped (not tradeable): {reason}")
+
+                        try:
+                            self._require_tradeable_qty(
+                                symbol,
+                                qty,
+                                context="Trend exit sell",
+                                ignore_min_trade=True
+                            )
+                        except ValueError as e:
+                            logger.warning(str(e))
+                            time.sleep(poll_seconds)
+                            continue
+
+                        order = self.safe_sell_all(symbol)
+                        if order:
+                            self._emit_sell(
+                                "TREND_EXIT",
+                                order,
+                                {
+                                    "current": current,
+                                    "sma": sma_slow,
+                                    "max_price": max_price,
+                                },
+                                on_sell=on_sell,
+                            )
+                            return order
                 except Exception as e:
                     logger.warning(f"TREND EXIT skipped (calc error): {e}")
 
-            # 3) Classic trailing trigger
+            # 3) TRAILING STOP — price based
             stop_price = max_price * (1 - trailing_pct)
             if current <= stop_price:
                 drop_pct = (max_price - current) / max_price
                 logger.warning(
-                    f"TRAILING TRIGGER | {symbol} | current={current:.2f} | stop={stop_price:.2f} | drop={drop_pct*100:.2f}%"
+                    f"TRAILING TRIGGER | {symbol} | "
+                    f"current={current:.2f} | stop={stop_price:.2f} | "
+                    f"drop={drop_pct*100:.2f}%"
                 )
 
-                ok, reason = self.can_trade(symbol, qty)
-                if not ok:
-                    logger.warning(f"SELL skipped (not tradeable): {reason}")
+                try:
+                    self._require_tradeable_qty(
+                        symbol,
+                        qty,
+                        context="Trailing sell",
+                        ignore_min_trade=True
+                    )
+                except ValueError as e:
+                    logger.warning(str(e))
                     time.sleep(poll_seconds)
                     continue
 
@@ -523,14 +641,18 @@ class Binance:
                     self._emit_sell(
                         "TRAILING",
                         order,
-                        {"current": current, "max_price": max_price, "stop_price": stop_price},
+                        {
+                            "current": current,
+                            "max_price": max_price,
+                            "stop_price": stop_price,
+                            "drop_pct": drop_pct,
+                        },
                         on_sell=on_sell,
                     )
-                    logger.success(f"TRAILING SOLD | {symbol} | orderId={order.get('orderId')}")
-
                     return order
 
             time.sleep(poll_seconds)
+
 
     def _sma(self, values: list[float], period: int) -> float:
         if len(values) < period:

@@ -15,32 +15,28 @@ load_dotenv()
 setup_logging()
 
 # =========================
-# BOT CONFIG
+# BOT CONFIG (from .env)
 # =========================
-SYMBOL = "BTCUSDT"
-BASE_ASSET = "BTC"
+SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
+BASE_ASSET = os.getenv("BASE_ASSET", "BTC")
 
-BUY_USDT = 7.0
-TRAILING_PCT = 0.01  # 1%
+BUY_USDT = float(os.getenv("BUY_USDT", "7.0"))
+MAX_BUYS_PER_DAY = int(os.getenv("MAX_BUYS_PER_DAY", "1"))
+DAILY_BUDGET_USDT = float(os.getenv("DAILY_BUDGET_USDT", "20.0"))
 
-POLL_SECONDS_IDLE = 10.0
-POLL_SECONDS_IN_POS = 3.0
-ERROR_BACKOFF_SECONDS = 5.0
-COOLDOWN_AFTER_SELL_SECONDS = 60.0
+TRAILING_PCT = float(os.getenv("TRAILING_PCT", "0.01"))
+COOLDOWN_AFTER_SELL_SECONDS = float(os.getenv("COOLDOWN_AFTER_SELL_SECONDS", "60"))
 
-# =========================
-# ENTRY SIGNAL CONFIG (SMA)
-# =========================
-KLINE_INTERVAL = Client.KLINE_INTERVAL_1MINUTE
-KLINE_LIMIT = 60
-SMA_FAST = 7
-SMA_SLOW = 25
+POLL_SECONDS_IDLE = float(os.getenv("POLL_SECONDS_IDLE", "10"))
+POLL_SECONDS_IN_POS = float(os.getenv("POLL_SECONDS_IN_POS", "3"))
+ERROR_BACKOFF_SECONDS = float(os.getenv("ERROR_BACKOFF_SECONDS", "5"))
 
-# =========================
-# RISK LIMITS (ANTI-BLOWUP)
-# =========================
-MAX_BUYS_PER_DAY = 1
-DAILY_BUDGET_USDT = 20.0
+KLINE_INTERVAL = os.getenv("KLINE_INTERVAL", "1m")
+KLINE_LIMIT = int(os.getenv("KLINE_LIMIT", "60"))
+SMA_FAST = int(os.getenv("SMA_FAST", "7"))
+SMA_SLOW = int(os.getenv("SMA_SLOW", "25"))
+
+
 
 BOGOTA_TZ = ZoneInfo("America/Bogota")
 
@@ -62,7 +58,11 @@ def sma(values: list[float], period: int) -> float:
 
 
 def entry_signal_sma(binance: Binance, symbol: str) -> bool:
-    klines = binance.get_klines(symbol=symbol, interval=KLINE_INTERVAL, limit=KLINE_LIMIT)
+    klines = binance.get_klines(
+        symbol=symbol,
+        interval=KLINE_INTERVAL,
+        limit=KLINE_LIMIT
+    )
     closes = [float(k[4]) for k in klines]
 
     closes_now = closes[:-1]
@@ -221,18 +221,24 @@ def main() -> None:
                 sleep_s(POLL_SECONDS_IDLE)
                 continue
 
-            # 3) Entry decision
             if usdt >= BUY_USDT:
                 if entry_signal_sma(binance, SYMBOL):
+
+                    if binance.is_price_overextended(SYMBOL):
+                        logger.warning("BUY skipped: price too extended above SMA")
+                        sleep_s(POLL_SECONDS_IDLE)
+                        continue
+
                     logger.info(f"ENTRY SIGNAL OK | Buying {SYMBOL} with {BUY_USDT} USDT")
                     order = binance.buy(SYMBOL, BUY_USDT)
                     logger.success(f"BUY FILLED | orderId={order.get('orderId')}")
 
+                    # ✅ SOLO aquí usamos order
                     spent = float(order.get("cummulativeQuoteQty", 0.0))
                     qty = float(order.get("executedQty", 0.0))
                     price = spent / qty if qty > 0 else 0.0
 
-                    open_position_spent = spent  # guardamos para comparar cuando venda
+                    open_position_spent = spent
 
                     notifier.send(
                         f"🟢 BUY FILLED\n"
@@ -241,7 +247,7 @@ def main() -> None:
                         f"Qty: {qty:.8f} {BASE_ASSET}\n"
                         f"AvgPrice: {price:.2f}\n"
                         f"Day buys: {buys_today+1}/{MAX_BUYS_PER_DAY}"
-)
+                    )
 
                     buys_today += 1
                     spent_today += spent
@@ -256,6 +262,7 @@ def main() -> None:
                 else:
                     logger.info("NO SIGNAL | No SMA cross up. Waiting...")
                     sleep_s(POLL_SECONDS_IDLE)
+
 
             else:
                 logger.info(f"IDLE | Not enough USDT to buy (need {BUY_USDT}). Sleeping...")
