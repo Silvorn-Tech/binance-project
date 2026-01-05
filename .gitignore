@@ -19,3 +19,5 @@
 **/develop-eggs/
 **/.eggs/
 **/binance_bot.egg-info/
+logs/
+src/binance_project.egg-info/
