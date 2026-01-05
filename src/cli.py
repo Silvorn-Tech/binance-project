@@ -7,6 +7,9 @@ from binance.client import Client
 
 from utils.logging_config import setup_logging
 from .providers.binance import Binance
+from .providers.whatsapp import WhatsAppNotifier
+
+from zoneinfo import ZoneInfo
 
 load_dotenv()
 setup_logging()
@@ -39,14 +42,17 @@ SMA_SLOW = 25
 MAX_BUYS_PER_DAY = 1
 DAILY_BUDGET_USDT = 20.0
 
+BOGOTA_TZ = ZoneInfo("America/Bogota")
+
+def now_bogota() -> datetime:
+    return datetime.now(tz=BOGOTA_TZ)
+
+def day_key_bogota() -> str:
+    return now_bogota().strftime("%Y-%m-%d")
+
 
 def sleep_s(seconds: float) -> None:
     time.sleep(seconds)
-
-
-def day_key_bogota() -> str:
-    # Uses your machine time (Bogotá is your timezone generally).
-    return datetime.now().strftime("%Y-%m-%d")
 
 
 def sma(values: list[float], period: int) -> float:
@@ -74,6 +80,10 @@ def entry_signal_sma(binance: Binance, symbol: str) -> bool:
 
 
 def main() -> None:
+    open_position_spent = 0.0
+    gross_pnl_usdt = 0.0
+    last_summary_day = None
+    summary_sent_today = False
     api_key = os.getenv("BINANCE_API_KEY")
     api_secret = os.getenv("BINANCE_API_SECRET")
 
@@ -83,11 +93,51 @@ def main() -> None:
 
     binance = Binance(api_key, api_secret)
 
+    notifier = WhatsAppNotifier(
+        account_sid=os.getenv("TWILIO_ACCOUNT_SID", ""),
+        auth_token=os.getenv("TWILIO_AUTH_TOKEN", ""),
+        from_whatsapp=os.getenv("TWILIO_WHATSAPP_FROM", ""),
+        to_whatsapp=os.getenv("TWILIO_WHATSAPP_TO", ""),
+    )
+
+    notifier.send(f"🤖 BOT STARTED on {day_key_bogota()} at {now_bogota().strftime('%H:%M:%S')}")
+
     logger.info("BOT STARTED | cyclic mode | trailing stop + SMA entry")
 
     day = day_key_bogota()
     buys_today = 0
     spent_today = 0.0
+
+    def on_sell(reason: str, order: dict, extra: dict) -> None:
+        nonlocal open_position_spent, gross_pnl_usdt
+
+        received = float(order.get("cummulativeQuoteQty", 0.0))
+        sold_qty = float(order.get("executedQty", 0.0))
+
+        trade_pnl = received - open_position_spent
+        gross_pnl_usdt += trade_pnl
+
+        current = extra.get("current")
+        max_price = extra.get("max_price")
+        stop_price = extra.get("stop_price")
+        sma_val = extra.get("sma")
+
+        open_position_spent = 0.0  # reset posición
+
+        details = []
+        if current is not None: details.append(f"Current: {current:.2f}")
+        if max_price is not None: details.append(f"Max: {max_price:.2f}")
+        if stop_price is not None: details.append(f"Stop: {stop_price:.2f}")
+        if sma_val is not None: details.append(f"SMA: {sma_val:.2f}")
+
+        notifier.send(
+            f"🔴 SELL FILLED ({reason})\n"
+            f"Symbol: {SYMBOL}\n"
+            f"Received: {received:.4f} USDT\n"
+            f"SoldQty: {sold_qty:.8f} {BASE_ASSET}\n"
+            f"PnL: {trade_pnl:+.4f} USDT\n"
+            f"{' | '.join(details)}"
+        )
 
     while True:
         try:
@@ -117,6 +167,7 @@ def main() -> None:
                 max_hold_seconds_without_new_high=5 * 60,
                 trend_exit_enabled=True,
                 trend_sma_period=25,
+                on_sell=on_sell,
             )
 
             # 1) If we already have a position -> manage with trailing stop
@@ -152,6 +203,21 @@ def main() -> None:
                     logger.info(f"ENTRY SIGNAL OK | Buying {SYMBOL} with {BUY_USDT} USDT")
                     order = binance.buy(SYMBOL, BUY_USDT)
                     logger.success(f"BUY FILLED | orderId={order.get('orderId')}")
+
+                    spent = float(order.get("cummulativeQuoteQty", 0.0))
+                    qty = float(order.get("executedQty", 0.0))
+                    price = spent / qty if qty > 0 else 0.0
+
+                    open_position_spent = spent  # guardamos para comparar cuando venda
+
+                    notifier.send(
+                        f"🟢 BUY FILLED\n"
+                        f"Symbol: {SYMBOL}\n"
+                        f"Spent: {spent:.4f} USDT\n"
+                        f"Qty: {qty:.8f} {BASE_ASSET}\n"
+                        f"AvgPrice: {price:.2f}\n"
+                        f"Day buys: {buys_today+1}/{MAX_BUYS_PER_DAY}"
+)
 
                     buys_today += 1
                     spent_today += BUY_USDT

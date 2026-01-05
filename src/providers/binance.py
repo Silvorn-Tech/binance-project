@@ -2,7 +2,7 @@ from binance.client import Client
 from decimal import Decimal, ROUND_DOWN
 from loguru import logger
 import time
-from typing import Optional
+from typing import Optional, Callable, Any
 
 
 class Binance:
@@ -395,6 +395,14 @@ class Binance:
     # Trailing Stop (bot-managed)
     # =========================
 
+    def _emit_sell(reason: str, order: dict, extra: dict, on_sell: Optional[Callable[[str, dict, dict], Any]] = None) -> None:
+        if on_sell is None:
+            return
+        try:
+            on_sell(reason, order, extra)
+        except Exception as e:
+            logger.warning(f"on_sell callback failed: {e}")
+
     def trailing_stop_sell_all_pct(
         self,
         symbol: str,
@@ -408,6 +416,7 @@ class Binance:
         trend_interval: str = Client.KLINE_INTERVAL_1MINUTE,
         trend_limit: int = 60,
         trend_sma_period: int = 25,
+        on_sell: Optional[Callable[[str, dict, dict], Any]] = None,
     ) -> dict | None:
         symbol = symbol.upper()
         base_asset = self._get_base_asset(symbol)
@@ -430,7 +439,7 @@ class Binance:
                 return None
 
             qty = self.get_asset_free(base_asset)
-            if qty <= 0:
+            if qty <= 0.0:
                 logger.warning(f"TRAILING STOP ended: no {base_asset} free balance")
                 return None
 
@@ -457,7 +466,12 @@ class Binance:
                 if ok:
                     order = self.safe_sell_all(symbol)
                     if order:
-                        logger.success(f"TIME STOP SOLD | {symbol} | orderId={order.get('orderId')}")
+                        self._emit_sell(
+                            "TIME_STOP",
+                            order,
+                            {"current": current, "max_price": max_price, "no_new_high_for_s": now - last_new_high_ts},
+                            on_sell=on_sell,
+                        )
                         return order
                 else:
                     logger.warning(f"SELL skipped (not tradeable): {reason}")
@@ -479,7 +493,12 @@ class Binance:
                         if ok:
                             order = self.safe_sell_all(symbol)
                             if order:
-                                logger.success(f"TREND EXIT SOLD | {symbol} | orderId={order.get('orderId')}")
+                                self._emit_sell(
+                                    "TREND_EXIT",
+                                    order,
+                                    {"current": current, "sma": sma_slow, "max_price": max_price},
+                                    on_sell=on_sell,
+                                )
                                 return order
                         else:
                             logger.warning(f"SELL skipped (not tradeable): {reason}")
@@ -502,7 +521,14 @@ class Binance:
 
                 order = self.safe_sell_all(symbol)
                 if order:
+                    self._emit_sell(
+                        "TRAILING",
+                        order,
+                        {"current": current, "max_price": max_price, "stop_price": stop_price},
+                        on_sell=on_sell,
+                    )
                     logger.success(f"TRAILING SOLD | {symbol} | orderId={order.get('orderId')}")
+
                     return order
 
             time.sleep(poll_seconds)
