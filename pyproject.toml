@@ -13,6 +13,9 @@ dependencies = [
   "twilio>=8.0.0"
 ]
 
+[project.scripts]
+sentinel = "cli:main"
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 

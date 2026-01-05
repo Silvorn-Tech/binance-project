@@ -6,8 +6,8 @@ from loguru import logger
 from binance.client import Client
 
 from utils.logging_config import setup_logging
-from .providers.binance import Binance
-from .providers.whatsapp import WhatsAppNotifier
+from providers.binance import Binance
+from providers.whatsapp import WhatsAppNotifier
 
 from zoneinfo import ZoneInfo
 
