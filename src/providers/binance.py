@@ -445,14 +445,6 @@ class Binance:
     # Trailing Stop (bot-managed)
     # =========================
 
-    def _emit_sell(reason: str, order: dict, extra: dict, on_sell: Optional[Callable[[str, dict, dict], Any]] = None) -> None:
-        if on_sell is None:
-            return
-        try:
-            on_sell(reason, order, extra)
-        except Exception as e:
-            logger.warning(f"on_sell callback failed: {e}")
-
     def is_price_overextended(
         self,
         symbol: str,
@@ -497,7 +489,6 @@ class Binance:
         trend_interval: str = Client.KLINE_INTERVAL_1MINUTE,
         trend_limit: int = 60,
         trend_sma_period: int = 25,
-        on_sell: Optional[Callable[[str, dict, dict], Any]] = None,
     ) -> dict | None:
         symbol = symbol.upper()
         base_asset = self._get_base_asset(symbol)
@@ -558,16 +549,6 @@ class Binance:
 
                 order = self.safe_sell_all(symbol)
                 if order:
-                    self._emit_sell(
-                        "TIME_STOP",
-                        order,
-                        {
-                            "current": current,
-                            "max_price": max_price,
-                            "no_new_high_for_s": now - last_new_high_ts,
-                        },
-                        on_sell,
-                    )
                     return order
 
             # 2) TREND EXIT — SMA based
@@ -600,16 +581,6 @@ class Binance:
 
                         order = self.safe_sell_all(symbol)
                         if order:
-                            self._emit_sell(
-                                "TREND_EXIT",
-                                order,
-                                {
-                                    "current": current,
-                                    "sma": sma_slow,
-                                    "max_price": max_price,
-                                },
-                                on_sell,
-                            )
                             return order
                 except Exception as e:
                     logger.warning(f"TREND EXIT skipped (calc error): {e}")
@@ -638,18 +609,8 @@ class Binance:
 
                 order = self.safe_sell_all(symbol)
                 if order:
-                    self._emit_sell(
-                        "TRAILING",
-                        order,
-                        {
-                            "current": current,
-                            "max_price": max_price,
-                            "stop_price": stop_price,
-                            "drop_pct": drop_pct,
-                        },
-                        on_sell,
-                    )
                     return order
+                
 
             time.sleep(poll_seconds)
 

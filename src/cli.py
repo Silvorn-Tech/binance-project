@@ -108,39 +108,25 @@ def main() -> None:
     buys_today = 0
     spent_today = 0.0
 
-    def on_sell(reason: str, order: dict, extra: dict) -> None:
-        nonlocal open_position_spent, gross_pnl_usdt
+    def notify_sell(result: dict) -> None:
+        nonlocal open_position_spent
 
-        received = float(order.get("cummulativeQuoteQty", 0.0))
-        sold_qty = float(order.get("executedQty", 0.0))
+        received = float(result.get("cummulativeQuoteQty", 0.0))
+        sold_qty = float(result.get("executedQty", 0.0))
 
-        if open_position_spent <= 0:
-            trade_pnl = 0.0
-        else:
-            trade_pnl = received - open_position_spent
-
-        gross_pnl_usdt += trade_pnl
-        open_position_spent = 0.0
-
-        current = extra.get("current")
-        max_price = extra.get("max_price")
-        stop_price = extra.get("stop_price")
-        sma_val = extra.get("sma")
-
-        details = []
-        if current is not None: details.append(f"Current: {current:.2f}")
-        if max_price is not None: details.append(f"Max: {max_price:.2f}")
-        if stop_price is not None: details.append(f"Stop: {stop_price:.2f}")
-        if sma_val is not None: details.append(f"SMA: {sma_val:.2f}")
+        profit = received - open_position_spent
 
         notifier.send(
-            f"🔴 SELL FILLED ({reason})\n"
+            f"🔴 SELL FILLED\n"
             f"Symbol: {SYMBOL}\n"
+            f"Sold: {sold_qty:.8f} {BASE_ASSET}\n"
             f"Received: {received:.4f} USDT\n"
-            f"SoldQty: {sold_qty:.8f} {BASE_ASSET}\n"
-            f"PnL: {trade_pnl:+.4f} USDT\n"
-            f"{' | '.join(details)}"
+            f"Spent: {open_position_spent:.4f} USDT\n"
+            f"Profit: {profit:+.4f} USDT"
         )
+
+        open_position_spent = 0.0
+
 
 
     while True:
@@ -191,7 +177,6 @@ def main() -> None:
                 max_hold_seconds_without_new_high=5 * 60,
                 trend_exit_enabled=True,
                 trend_sma_period=25,
-                on_sell=on_sell,
             )
 
             # 1) If we already have a position -> manage with trailing stop
@@ -201,6 +186,14 @@ def main() -> None:
                     result = binance.trailing_stop_sell_all_pct(**TRAILING_KWARGS)
 
                     if result is not None:
+                        received = float(result.get("cummulativeQuoteQty", 0.0))
+                        sold_qty = float(result.get("executedQty", 0.0))
+
+                        profit = received - open_position_spent
+
+                        notify_sell(result)
+
+                        open_position_spent = 0.0  # reset
                         logger.info(f"COOLDOWN | Waiting {COOLDOWN_AFTER_SELL_SECONDS:.0f}s...")
                         sleep_s(COOLDOWN_AFTER_SELL_SECONDS)
                 else:
@@ -256,6 +249,14 @@ def main() -> None:
                     result = binance.trailing_stop_sell_all_pct(**TRAILING_KWARGS)
 
                     if result is not None:
+                        received = float(result.get("cummulativeQuoteQty", 0.0))
+                        sold_qty = float(result.get("executedQty", 0.0))
+
+                        profit = received - open_position_spent
+
+                        notify_sell(result)
+
+                        open_position_spent = 0.0  # reset
                         logger.info(f"COOLDOWN | Waiting {COOLDOWN_AFTER_SELL_SECONDS:.0f}s...")
                         sleep_s(COOLDOWN_AFTER_SELL_SECONDS)
 
