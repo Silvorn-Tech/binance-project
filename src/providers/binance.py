@@ -445,7 +445,6 @@ class Binance:
 
             current = self.get_price(symbol)
 
-            # Update max with epsilon threshold to avoid micro-noise
             if current > max_price * (1 + new_high_epsilon_pct):
                 max_price = current
                 last_new_high_ts = now

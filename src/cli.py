@@ -114,15 +114,18 @@ def main() -> None:
         received = float(order.get("cummulativeQuoteQty", 0.0))
         sold_qty = float(order.get("executedQty", 0.0))
 
-        trade_pnl = received - open_position_spent
+        if open_position_spent <= 0:
+            trade_pnl = 0.0
+        else:
+            trade_pnl = received - open_position_spent
+
         gross_pnl_usdt += trade_pnl
+        open_position_spent = 0.0
 
         current = extra.get("current")
         max_price = extra.get("max_price")
         stop_price = extra.get("stop_price")
         sma_val = extra.get("sma")
-
-        open_position_spent = 0.0  # reset posición
 
         details = []
         if current is not None: details.append(f"Current: {current:.2f}")
@@ -139,7 +142,28 @@ def main() -> None:
             f"{' | '.join(details)}"
         )
 
+
     while True:
+        
+        now = now_bogota()
+        new_day = day_key_bogota()
+
+        # reset flag when day changes
+        if new_day != last_summary_day:
+            summary_sent_today = False
+            last_summary_day = new_day
+
+        # send summary at 18:00 Bogotá
+        if now.hour == 18 and not summary_sent_today:
+            notifier.send(
+                f"📊 DAILY SUMMARY ({new_day})\n"
+                f"Buys: {buys_today}\n"
+                f"Spent: {spent_today:.2f} USDT\n"
+                f"Gross PnL: {gross_pnl_usdt:+.4f} USDT"
+            )
+            summary_sent_today = True
+
+
         try:
             # Reset counters daily
             new_day = day_key_bogota()
@@ -220,7 +244,7 @@ def main() -> None:
 )
 
                     buys_today += 1
-                    spent_today += BUY_USDT
+                    spent_today += spent
 
                     # Immediately manage with trailing stop
                     result = binance.trailing_stop_sell_all_pct(**TRAILING_KWARGS)
