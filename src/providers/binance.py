@@ -566,7 +566,7 @@ class Binance:
                             "max_price": max_price,
                             "no_new_high_for_s": now - last_new_high_ts,
                         },
-                        on_sell=on_sell,
+                        on_sell,
                     )
                     return order
 
@@ -608,7 +608,7 @@ class Binance:
                                     "sma": sma_slow,
                                     "max_price": max_price,
                                 },
-                                on_sell=on_sell,
+                                on_sell,
                             )
                             return order
                 except Exception as e:
@@ -647,7 +647,7 @@ class Binance:
                             "stop_price": stop_price,
                             "drop_pct": drop_pct,
                         },
-                        on_sell=on_sell,
+                        on_sell,
                     )
                     return order
 
