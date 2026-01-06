@@ -19,3 +19,7 @@ sentinel = "cli:main"
 [tool.setuptools]
 package-dir = {"" = "src"}
 py-modules = ["cli"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["utils", "providers"]
