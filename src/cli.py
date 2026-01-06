@@ -7,7 +7,7 @@ from binance.client import Client
 
 from utils.logging_config import setup_logging
 from providers.binance import Binance
-from providers.whatsapp import WhatsAppNotifier
+from providers.Telegram import TelegramNotifier
 
 from zoneinfo import ZoneInfo
 
@@ -93,12 +93,11 @@ def main() -> None:
 
     binance = Binance(api_key, api_secret)
 
-    notifier = WhatsAppNotifier(
-        account_sid=os.getenv("TWILIO_ACCOUNT_SID", ""),
-        auth_token=os.getenv("TWILIO_AUTH_TOKEN", ""),
-        from_whatsapp=os.getenv("TWILIO_WHATSAPP_FROM", ""),
-        to_whatsapp=os.getenv("TWILIO_WHATSAPP_TO", ""),
+    notifier = TelegramNotifier(
+        bot_token=os.getenv("TELEGRAM_BOT_TOKEN"),
+        chat_id=int(os.getenv("TELEGRAM_CHAT_ID")),
     )
+
 
     notifier.send(f"🤖 BOT STARTED on {day_key_bogota()} at {now_bogota().strftime('%H:%M:%S')}")
 
