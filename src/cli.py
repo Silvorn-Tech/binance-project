@@ -2,6 +2,7 @@ import os
 import time
 from datetime import datetime
 from dotenv import load_dotenv
+from pathlib import Path
 from loguru import logger
 from binance.client import Client
 
@@ -11,7 +12,7 @@ from providers.Telegram import TelegramNotifier
 
 from zoneinfo import ZoneInfo
 
-load_dotenv()
+load_dotenv(dotenv_path=Path.cwd() / ".env", override=True)
 setup_logging()
 
 # =========================
