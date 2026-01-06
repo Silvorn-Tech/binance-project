@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 sentinel = "cli:main"
+equilibrium = "cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
