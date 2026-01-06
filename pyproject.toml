@@ -14,8 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-sentinel = "cli:main"
-sentinel-tool = "sentinel.cli:main"
+sentinel = "sentinel.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
