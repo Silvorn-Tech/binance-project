@@ -21,3 +21,4 @@
 **/binance_bot.egg-info/
 logs/
 src/binance_project.egg-info/
+src/sentinel_bot.egg-info/**
