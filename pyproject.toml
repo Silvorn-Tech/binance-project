@@ -29,8 +29,5 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = [
-  "hermes.utils",
-  "hermes.providers",
-  "hermes.service"
-]
+include = ["hermes", "hermes.*"]
+
