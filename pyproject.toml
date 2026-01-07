@@ -3,9 +3,11 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sentinel-bot"
+name = "hermes"
 version = "0.1.0"
+description = "Multi-profile Binance trading bot (Sentinel / Equilibrium / Vortex)"
 requires-python = ">=3.10"
+
 dependencies = [
   "python-binance>=1.0.19",
   "python-dotenv>=1.0.1",
@@ -13,14 +15,22 @@ dependencies = [
   "python-telegram-bot>=20.7"
 ]
 
+# =========================
+# CLI ENTRYPOINTS
+# =========================
 [project.scripts]
-sentinel = "cli:main"
-equilibrium = "cli:main"
+hermes = "cli:main"
 
+# =========================
+# SETUPTOOLS CONFIG
+# =========================
 [tool.setuptools]
 package-dir = {"" = "src"}
-py-modules = ["cli"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["utils", "providers"]
+include = [
+  "utils",
+  "providers",
+  "service"
+]
