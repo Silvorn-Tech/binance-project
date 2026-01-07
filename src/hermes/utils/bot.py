@@ -5,9 +5,9 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from loguru import logger
 
-from utils.bot_config import BotConfig
-from providers.binance import Binance
-from providers.Telegram import TelegramNotifier
+from hermes.utils.bot_config import BotConfig
+from hermes.providers.binance import Binance
+from hermes.providers.Telegram import TelegramNotifier
 
 
 BOGOTA_TZ = ZoneInfo("America/Bogota")

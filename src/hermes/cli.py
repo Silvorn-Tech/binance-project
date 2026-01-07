@@ -4,11 +4,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 from loguru import logger
 
-from providers.binance import Binance
-from providers.Telegram import TelegramNotifier
-from utils.logging_config import setup_logging
-from service.bot_service import BotService
-from controller import Controller
+from hermes.providers.binance import Binance
+from hermes.providers.Telegram import TelegramNotifier
+from hermes.utils.logging_config import setup_logging
+from hermes.service.bot_service import BotService
+from hermes.controller import Controller
 
 
 def main() -> None:

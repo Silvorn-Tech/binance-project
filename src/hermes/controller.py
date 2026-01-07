@@ -13,8 +13,8 @@ from telegram.ext import (
     filters,
 )
 
-from service.bot_service import BotService
-from service.bot_builder import BotBuilder
+from hermes.service.bot_service import BotService
+from hermes.service.bot_builder import BotBuilder
 from telegram.error import BadRequest
 from dataclasses import replace
 
