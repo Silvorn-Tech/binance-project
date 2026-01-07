@@ -19,7 +19,7 @@ dependencies = [
 # CLI ENTRYPOINTS
 # =========================
 [project.scripts]
-hermes = "cli:main"
+hermes = "hermes.cli:main"
 
 # =========================
 # SETUPTOOLS CONFIG

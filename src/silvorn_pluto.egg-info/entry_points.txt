@@ -1,4 +1,0 @@
-[console_scripts]
-equilibrium = cli:main
-sentinel = cli:main
-vortex = cli:main

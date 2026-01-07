@@ -1,9 +1,0 @@
-Metadata-Version: 2.4
-Name: silvorn-pluto
-Version: 0.1.0
-Summary: Multi-profile Binance trading bot (Sentinel / Equilibrium / Vortex)
-Requires-Python: >=3.10
-Requires-Dist: python-binance>=1.0.19
-Requires-Dist: python-dotenv>=1.0.1
-Requires-Dist: loguru>=0.7.2
-Requires-Dist: python-telegram-bot>=20.7
