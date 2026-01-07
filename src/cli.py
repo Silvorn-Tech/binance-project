@@ -109,12 +109,13 @@ def main() -> None:
     spent_today = 0.0
 
     def notify_sell(result: dict) -> None:
-        nonlocal open_position_spent
+        nonlocal open_position_spent, gross_pnl_usdt
 
         received = float(result.get("cummulativeQuoteQty", 0.0))
         sold_qty = float(result.get("executedQty", 0.0))
-
         profit = received - open_position_spent
+
+        gross_pnl_usdt += profit
 
         notifier.send(
             f"🔴 SELL FILLED\n"
@@ -126,8 +127,6 @@ def main() -> None:
         )
 
         open_position_spent = 0.0
-
-
 
     while True:
         
@@ -180,28 +179,16 @@ def main() -> None:
             )
 
             # 1) If we already have a position -> manage with trailing stop
-            if base_qty > 0.0:
-                ok, _ = binance.can_trade(SYMBOL, base_qty)
-                if ok:
-                    result = binance.trailing_stop_sell_all_pct(**TRAILING_KWARGS)
+            if open_position_spent > 0:
+                result = binance.trailing_stop_sell_all_pct(**TRAILING_KWARGS)
 
-                    if result is not None:
-                        received = float(result.get("cummulativeQuoteQty", 0.0))
-                        sold_qty = float(result.get("executedQty", 0.0))
+                if result is not None:
+                    notify_sell(result)
 
-                        profit = received - open_position_spent
-
-                        notify_sell(result)
-
-                        open_position_spent = 0.0  # reset
-                        logger.info(f"COOLDOWN | Waiting {COOLDOWN_AFTER_SELL_SECONDS:.0f}s...")
-                        sleep_s(COOLDOWN_AFTER_SELL_SECONDS)
-                else:
-                    logger.warning("DUST POSITION | balance too small to sell. Ignoring position.")
-                    sleep_s(POLL_SECONDS_IDLE)
+                    logger.info(f"COOLDOWN | Waiting {COOLDOWN_AFTER_SELL_SECONDS:.0f}s...")
+                    sleep_s(COOLDOWN_AFTER_SELL_SECONDS)
 
                 continue
-
 
             # 2) No position -> risk checks before buying
             if buys_today >= MAX_BUYS_PER_DAY:
