@@ -1,7 +1,7 @@
 # src/service/bot_builder.py
 
-from utils.bot_config import BotConfig
-from service.profiles import PROFILES
+from hermes.utils.bot_config import BotConfig
+from hermes.service.profiles import PROFILES
 
 
 class BotBuilder:

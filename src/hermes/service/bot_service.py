@@ -1,11 +1,11 @@
 # src/service/bot_service.py
 from loguru import logger
 
-from service.bot_builder import BotBuilder
-from utils.bot import Bot
-from providers.binance import Binance
-from providers.Telegram import TelegramNotifier
-from utils.bot_config import BotConfig
+from hermes.service.bot_builder import BotBuilder
+from hermes.utils.bot import Bot
+from hermes.providers.binance import Binance
+from hermes.providers.Telegram import TelegramNotifier
+from hermes.utils.bot_config import BotConfig
 
 
 class BotService:
