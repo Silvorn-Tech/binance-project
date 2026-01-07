@@ -30,7 +30,7 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 include = [
-  "utils",
-  "providers",
-  "service"
+  "hermes.utils",
+  "hermes.providers",
+  "hermes.service"
 ]
