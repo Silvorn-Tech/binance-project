@@ -502,6 +502,7 @@ class Binance:
         symbol = symbol.upper()
         base_asset = self._get_base_asset(symbol)
 
+        min_exit_notional_usdt = 5.0
         start_ts = time.time()
         current = self.get_price(symbol)
         max_price = max(current, initial_max_price) if initial_max_price else current
@@ -526,6 +527,13 @@ class Binance:
                 return None
 
             current = self.get_price(symbol)
+            notional = qty * current
+            if notional < min_exit_notional_usdt:
+                logger.info(
+                    f"EXIT ABORTED | {symbol} | reason=NOTIONAL_TOO_SMALL | "
+                    f"qty={qty:.8f} | price={current:.2f} | notional={notional:.2f} USDT"
+                )
+                return None
 
             # Update max price
             if current > max_price * (1 + new_high_epsilon_pct):
