@@ -8,6 +8,7 @@ from loguru import logger
 from hermes.service.bot_state import BotRuntimeState
 from hermes.utils.bot_config import BotConfig
 from hermes.providers.binance import Binance
+from hermes.providers.market_data import MarketData
 from hermes.utils.trading_mode import TradingMode
 
 BOGOTA_TZ = ZoneInfo("America/Bogota")
@@ -19,12 +20,14 @@ class Bot(Thread):
     def __init__(
         self,
         config: BotConfig,
-        binance: Binance,
+        market_data: MarketData,
+        binance: Binance | None,
         state: BotRuntimeState,
     ):
         super().__init__(daemon=True)
 
         self.config = config
+        self.market = market_data
         self.binance = binance
         self.state = state
 
@@ -135,6 +138,8 @@ class Bot(Thread):
     # Core trading loop
     # =========================
     def _trade_cycle(self):
+        if self.state.trading_mode != TradingMode.LIVE and self.binance is not None:
+            logger.warning("⚠️ Binance injected outside LIVE mode")
         # Daily reset
         day = self._day_key()
         if day != self.current_day:
@@ -150,8 +155,20 @@ class Bot(Thread):
             self._simulate_vortex()
             return
 
-        usdt = self.binance.get_asset_free("USDT")
-        base_qty = self.binance.get_asset_free(self.config.base_asset)
+        # =========================
+        # Capital snapshot (SAFE)
+        # =========================
+        if self.state.trading_mode == TradingMode.LIVE:
+            if not self.state.live_authorized or self.state.waiting_for_confirmation:
+                usdt = 0.0
+                base_qty = 0.0
+            else:
+                self._require_live()
+                usdt = self.binance.get_asset_free("USDT")
+                base_qty = self.binance.get_asset_free(self.config.base_asset)
+        else:
+            usdt = self._get_available_capital()
+            base_qty = 0.0
 
         self._set_state(
             usdt_balance=usdt,
@@ -180,7 +197,7 @@ class Bot(Thread):
         # =========================
         # 2) ARMING
         # =========================
-        price = float(self.binance.get_price(self.config.symbol))
+        price = float(self.market.get_price(self.config.symbol))
         self._set_state(last_price=price)
 
         if self.arm_price is None:
@@ -285,7 +302,7 @@ class Bot(Thread):
     # =========================
     def _simulate_vortex(self):
         try:
-            klines = self.binance.get_klines(
+            klines = self.market.get_klines(
                 self.config.symbol,
                 self.config.kline_interval,
                 self.config.kline_limit,
@@ -373,7 +390,7 @@ class Bot(Thread):
 
     def _vortex_live_cycle(self, usdt: float) -> None:
         try:
-            klines = self.binance.get_klines(
+            klines = self.market.get_klines(
                 self.config.symbol,
                 self.config.kline_interval,
                 self.config.kline_limit,
@@ -480,6 +497,25 @@ class Bot(Thread):
         )
         return price, score
 
+    def _get_available_capital(self) -> float:
+        if self.binance is None:
+            return self.state.virtual_capital
+
+        if not self.state.live_authorized or self.state.waiting_for_confirmation:
+            logger.debug("Capital access blocked: bot not fully armed")
+            return 0.0
+
+        self._require_live()
+        return self.binance.get_asset_free("USDT")
+
+    def _require_live(self) -> None:
+        if (
+            self.binance is None
+            or self.state.trading_mode != TradingMode.LIVE
+            or not self.state.live_authorized
+        ):
+            raise RuntimeError("🚫 Binance access blocked: not authorized LIVE mode")
+
     def _compute_velocity(self, prices: list[float], n: int = 5) -> float:
         if len(prices) < n + 1:
             return 0.0
@@ -503,6 +539,7 @@ class Bot(Thread):
     # Trading actions
     # =========================
     def _buy(self):
+        self._require_live()
         order = self.binance.buy(self.config.symbol, self.config.buy_usdt)
 
         spent = float(order.get("cummulativeQuoteQty", 0.0))
@@ -525,6 +562,7 @@ class Bot(Thread):
         )
 
     def _manage_open_position(self):
+        self._require_live()
         result = self.binance.trailing_stop_sell_all_pct(
             symbol=self.config.symbol,
             trailing_pct=self.config.trailing_pct,
@@ -578,7 +616,7 @@ class Bot(Thread):
     # Strategy helpers
     # =========================
     def _entry_signal(self) -> bool:
-        klines = self.binance.get_klines(
+        klines = self.market.get_klines(
             self.config.symbol,
             self.config.kline_interval,
             self.config.kline_limit,

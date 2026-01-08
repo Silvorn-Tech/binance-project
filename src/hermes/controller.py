@@ -801,6 +801,7 @@ class Controller:
             state.live_authorized = True
             state.live_authorized_at = time.time()
             state.awaiting_fresh_entry = True
+            self.bot_service.enable_live(symbol)
 
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -835,6 +836,7 @@ class Controller:
             state.live_authorized = False
             state.live_authorized_at = None
             state.awaiting_fresh_entry = False
+            self.bot_service.disable_live(symbol)
 
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -1017,6 +1019,7 @@ class Controller:
                 state.real_capital_enabled = False
                 state.armed_notified = False
                 state.live_disabled_notified = True
+                self.bot_service.disable_live(state.symbol)
                 await context.bot.send_message(
                     chat_id=self.bot_service.notifier.chat_id,
                     text=(

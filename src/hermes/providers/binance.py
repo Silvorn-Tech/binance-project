@@ -75,6 +75,19 @@ class Binance:
         symbol = symbol.upper()
         return self._client.get_klines(symbol=symbol, interval=interval, limit=limit)
 
+
+class BinanceMarketData:
+    def __init__(self):
+        self._client = Client()
+
+    def get_price(self, symbol: str) -> float:
+        symbol = symbol.upper()
+        return float(self._client.get_symbol_ticker(symbol=symbol)["price"])
+
+    def get_klines(self, symbol: str, interval: str, limit: int = 50) -> list:
+        symbol = symbol.upper()
+        return self._client.get_klines(symbol=symbol, interval=interval, limit=limit)
+
     # =========================
     # Exchange adjustments
     # =========================
@@ -625,4 +638,3 @@ class Binance:
         closes = [float(k[4]) for k in klines]
         return self._sma(closes, period)
     
-

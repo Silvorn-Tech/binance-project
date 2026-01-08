@@ -6,7 +6,7 @@ from loguru import logger
 from telegram import Bot
 
 
-from hermes.providers.binance import Binance
+from hermes.providers.binance import Binance, BinanceMarketData
 from hermes.providers.Telegram import TelegramNotifier
 from hermes.utils.logging_config import setup_logging
 from hermes.service.bot_service import BotService
@@ -53,6 +53,7 @@ def main() -> None:
         api_key=binance_api_key,
         api_secret=binance_api_secret,
     )
+    market_data = BinanceMarketData()
 
     telegram_bot = Bot(token=telegram_token)
 
@@ -67,6 +68,7 @@ def main() -> None:
     # =========================
     bot_service = BotService(
         binance=binance,
+        market_data=market_data,
         notifier=notifier,
     )
 
