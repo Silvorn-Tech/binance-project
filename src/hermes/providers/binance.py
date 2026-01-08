@@ -75,19 +75,6 @@ class Binance:
         symbol = symbol.upper()
         return self._client.get_klines(symbol=symbol, interval=interval, limit=limit)
 
-
-class BinanceMarketData:
-    def __init__(self):
-        self._client = Client()
-
-    def get_price(self, symbol: str) -> float:
-        symbol = symbol.upper()
-        return float(self._client.get_symbol_ticker(symbol=symbol)["price"])
-
-    def get_klines(self, symbol: str, interval: str, limit: int = 50) -> list:
-        symbol = symbol.upper()
-        return self._client.get_klines(symbol=symbol, interval=interval, limit=limit)
-
     # =========================
     # Exchange adjustments
     # =========================
@@ -130,14 +117,21 @@ class BinanceMarketData:
                 return float(f.get("minNotional", 0.0))
 
         # Some symbols may not return it in spot filters; keep safe fallback.
-        logger.warning(f"No NOTIONAL/MIN_NOTIONAL filter found for {symbol}. Using 0.0 fallback.")
+        logger.warning(
+            f"No NOTIONAL/MIN_NOTIONAL filter found for {symbol}. Using 0.0 fallback."
+        )
         return 0.0
 
     # =========================
     # Trade validation
     # =========================
 
-    def can_trade(self, symbol: str, qty: float, enforce_user_min: bool = False) -> tuple[bool, str]:
+    def can_trade(
+        self,
+        symbol: str,
+        qty: float,
+        enforce_user_min: bool = False,
+    ) -> tuple[bool, str]:
         symbol = symbol.upper()
 
         if qty <= 0:
@@ -162,7 +156,6 @@ class BinanceMarketData:
 
         return True, ""
 
-
     def _require_tradeable_qty(
         self,
         symbol: str,
@@ -181,7 +174,7 @@ class BinanceMarketData:
         ok, reason = self.can_trade(
             symbol,
             qty,
-            enforce_user_min=not ignore_min_trade
+            enforce_user_min=not ignore_min_trade,
         )
         if not ok:
             raise ValueError(f"{context} skipped: {reason}")
@@ -194,7 +187,6 @@ class BinanceMarketData:
 
         return f"{adjusted_qty:.8f}"
 
-
     # =========================
     # Trading
     # =========================
@@ -206,7 +198,9 @@ class BinanceMarketData:
         """
         symbol = symbol.upper()
         if usdt < self.MIN_TRADE_USDT:
-            raise ValueError(f"USDT amount too small ({usdt}). Minimum is {self.MIN_TRADE_USDT} USDT.")
+            raise ValueError(
+                f"USDT amount too small ({usdt}). Minimum is {self.MIN_TRADE_USDT} USDT."
+            )
 
         logger.info(f"BUY | symbol={symbol} | usdt={usdt}")
 
@@ -238,7 +232,7 @@ class BinanceMarketData:
             symbol,
             raw_qty,
             context="Sell",
-            ignore_min_trade=True
+            ignore_min_trade=True,
         )
 
         logger.info(f"SELL | symbol={symbol} | qty={qty_str}")
@@ -274,7 +268,7 @@ class BinanceMarketData:
             symbol,
             qty,
             context="Sell all",
-            ignore_min_trade=True  # 🔑 KEY CHANGE
+            ignore_min_trade=True,  # KEY CHANGE
         )
 
         logger.info(f"SELL ALL | symbol={symbol} | qty={qty_str}")
@@ -293,7 +287,6 @@ class BinanceMarketData:
         )
 
         return order
-
 
     def safe_sell_all(self, symbol: str) -> dict | None:
         """
@@ -328,7 +321,7 @@ class BinanceMarketData:
             symbol,
             qty,
             context="Stop loss",
-            ignore_min_trade=True  # 🔑 KEY CHANGE
+            ignore_min_trade=True,  # KEY CHANGE
         )
 
         # 3. Adjust prices to tickSize
@@ -357,8 +350,12 @@ class BinanceMarketData:
 
         return order
 
-
-    def safe_stop_loss_pct(self, symbol: str, stop_pct: float = 0.01, limit_pct: float = 0.011) -> dict | None:
+    def safe_stop_loss_pct(
+        self,
+        symbol: str,
+        stop_pct: float = 0.01,
+        limit_pct: float = 0.011,
+    ) -> dict | None:
         """
         Safe STOP_LOSS_LIMIT using percentages below current market.
         Adjusts prices to tickSize.
@@ -379,12 +376,11 @@ class BinanceMarketData:
                 symbol,
                 qty,
                 context="Safe stop loss",
-                ignore_min_trade=True
+                ignore_min_trade=True,
             )
         except ValueError as e:
             logger.warning(str(e))
             return None
-
 
         stop_price = current * (1 - stop_pct)
         limit_price = current * (1 - limit_pct)
@@ -436,7 +432,7 @@ class BinanceMarketData:
             symbol,
             bnb_qty,
             context="BNB to BTC",
-            ignore_min_trade=True
+            ignore_min_trade=True,
         )
 
         logger.info(f"BNB → BTC | qty={qty_str}")
@@ -486,8 +482,6 @@ class BinanceMarketData:
         )
 
         return deviation > max_deviation_pct
-
-
 
     def trailing_stop_sell_all_pct(
         self,
@@ -553,7 +547,7 @@ class BinanceMarketData:
                         symbol,
                         qty,
                         context="Time stop sell",
-                        ignore_min_trade=True
+                        ignore_min_trade=True,
                     )
                 except ValueError as e:
                     logger.warning(str(e))
@@ -585,7 +579,7 @@ class BinanceMarketData:
                                 symbol,
                                 qty,
                                 context="Trend exit sell",
-                                ignore_min_trade=True
+                                ignore_min_trade=True,
                             )
                         except ValueError as e:
                             logger.warning(str(e))
@@ -613,7 +607,7 @@ class BinanceMarketData:
                         symbol,
                         qty,
                         context="Trailing sell",
-                        ignore_min_trade=True
+                        ignore_min_trade=True,
                     )
                 except ValueError as e:
                     logger.warning(str(e))
@@ -623,10 +617,8 @@ class BinanceMarketData:
                 order = self.safe_sell_all(symbol)
                 if order:
                     return order
-                
 
             time.sleep(poll_seconds)
-
 
     def _sma(self, values: list[float], period: int) -> float:
         if len(values) < period:
@@ -637,4 +629,16 @@ class BinanceMarketData:
         klines = self.get_klines(symbol=symbol, interval=interval, limit=limit)
         closes = [float(k[4]) for k in klines]
         return self._sma(closes, period)
-    
+
+
+class BinanceMarketData:
+    def __init__(self):
+        self._client = Client()
+
+    def get_price(self, symbol: str) -> float:
+        symbol = symbol.upper()
+        return float(self._client.get_symbol_ticker(symbol=symbol)["price"])
+
+    def get_klines(self, symbol: str, interval: str, limit: int = 50) -> list:
+        symbol = symbol.upper()
+        return self._client.get_klines(symbol=symbol, interval=interval, limit=limit)
