@@ -5,6 +5,7 @@ from pathlib import Path
 import csv
 
 from hermes.service.bot_builder import BotBuilder
+from hermes.config.bot_config_store import save_config
 from hermes.service.bot_state import BotRuntimeState
 from hermes.utils.bot import Bot
 from hermes.providers.binance import Binance
@@ -52,6 +53,7 @@ class BotService:
         )
 
         state = BotRuntimeState(
+            bot_id=config.bot_id,
             symbol=config.symbol,
             profile=config.profile,
             base_asset=config.base_asset,
@@ -70,6 +72,8 @@ class BotService:
 
         self._states[symbol] = state
 
+        save_config(config)
+
         live_binance = self.binance if state.trading_mode == TradingMode.LIVE else None
         bot = Bot(
             config=config,
@@ -81,6 +85,30 @@ class BotService:
 
         bot.start()
         self._bots[symbol] = bot
+
+    def get_bot_state_by_id(self, bot_id: str) -> BotRuntimeState | None:
+        for state in self._states.values():
+            if state.bot_id == bot_id:
+                return state
+        return None
+
+    def restart_bot_with_config(self, bot_id: str, config: BotConfig) -> None:
+        state = self.get_bot_state_by_id(bot_id)
+        if not state:
+            raise RuntimeError(f"No running bot for {bot_id}")
+
+        prev_message_id = state.telegram_message_id
+
+        self.stop_bot(state.symbol)
+        save_config(config)
+        self.start_bot_from_config(config)
+
+        if prev_message_id is not None:
+            new_state = self.get_bot_state_by_id(bot_id)
+            if new_state:
+                new_state.telegram_message_id = prev_message_id
+                new_state.last_dashboard_hash = None
+                new_state.last_dashboard_update = 0.0
 
     def stop_bot(self, symbol: str) -> None:
         symbol = symbol.upper()

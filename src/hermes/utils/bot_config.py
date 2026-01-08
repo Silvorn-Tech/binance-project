@@ -5,14 +5,19 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class BotConfig:
     # Identity
+    bot_id: str
     symbol: str
     base_asset: str
     profile: str
 
     # Capital & risk
-    buy_usdt: float
+    capital_pct: float
+    trade_pct: float
+    min_trade_usdt: float
     max_buys_per_day: int
     daily_budget_usdt: float
+    disable_max_buys_per_day: bool
+    disable_daily_budget: bool
 
     # Strategy
     sma_fast: int

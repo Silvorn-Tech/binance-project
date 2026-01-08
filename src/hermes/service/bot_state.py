@@ -9,6 +9,7 @@ from hermes.utils.trading_mode import TradingMode
 @dataclass
 class BotRuntimeState:
     # Identity
+    bot_id: str
     symbol: str
     profile: str
     config: Optional[BotConfig] = None

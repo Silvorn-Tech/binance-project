@@ -53,6 +53,7 @@ class Bot(Thread):
 
         # Initial snapshot
         self._set_state(
+            bot_id=config.bot_id,
             symbol=config.symbol,
             profile=config.profile,
             trailing_pct=config.trailing_pct,
@@ -225,6 +226,8 @@ class Bot(Thread):
             usdt = self._get_available_capital()
             base_qty = 0.0
 
+        trade_usdt = self._compute_trade_usdt(usdt)
+
         self._set_state(
             usdt_balance=usdt,
             base_balance=base_qty,
@@ -290,7 +293,7 @@ class Bot(Thread):
         # =========================
         # 3) Risk checks
         # =========================
-        if self.buys_today >= self.config.max_buys_per_day:
+        if (not self.config.disable_max_buys_per_day) and self.buys_today >= self.config.max_buys_per_day:
             self._set_state(
                 last_action="RISK_MAX_BUYS",
                 waiting_for_signal=False,
@@ -302,7 +305,7 @@ class Bot(Thread):
         if (
             self.state.real_capital_enabled
             and self.state.trading_mode == TradingMode.LIVE
-            and self.spent_today + self.config.buy_usdt > self.state.real_capital_limit
+            and self.spent_today + trade_usdt > self.state.real_capital_limit
         ):
             self._set_state(
                 last_action="RISK_REAL_CAP_LIMIT",
@@ -312,7 +315,7 @@ class Bot(Thread):
             time.sleep(10)
             return
 
-        if self.spent_today + self.config.buy_usdt > self.config.daily_budget_usdt:
+        if (not self.config.disable_daily_budget) and self.spent_today + trade_usdt > self.config.daily_budget_usdt:
             self._set_state(
                 last_action="RISK_DAILY_BUDGET",
                 waiting_for_signal=False,
@@ -321,7 +324,7 @@ class Bot(Thread):
             time.sleep(10)
             return
 
-        if usdt < self.config.buy_usdt:
+        if trade_usdt <= 0 or usdt < trade_usdt:
             self._set_state(
                 last_action="RISK_NO_USDT",
                 waiting_for_signal=False,
@@ -351,7 +354,7 @@ class Bot(Thread):
         # =========================
         # 5) BUY
         # =========================
-        self._buy()
+        self._buy(trade_usdt)
 
     # =========================
     # Vortex simulation (paper)
@@ -550,7 +553,9 @@ class Bot(Thread):
                 time.sleep(10)
                 return
 
-        if self.buys_today >= self.config.max_buys_per_day:
+        trade_usdt = self._compute_trade_usdt(usdt)
+
+        if (not self.config.disable_max_buys_per_day) and self.buys_today >= self.config.max_buys_per_day:
             self._set_state(
                 last_action="RISK_MAX_BUYS",
                 waiting_for_signal=False,
@@ -561,7 +566,7 @@ class Bot(Thread):
 
         if (
             self.state.real_capital_enabled
-            and self.spent_today + self.config.buy_usdt > self.state.real_capital_limit
+            and self.spent_today + trade_usdt > self.state.real_capital_limit
         ):
             self._set_state(
                 last_action="RISK_REAL_CAP_LIMIT",
@@ -571,7 +576,7 @@ class Bot(Thread):
             time.sleep(10)
             return
 
-        if self.spent_today + self.config.buy_usdt > self.config.daily_budget_usdt:
+        if (not self.config.disable_daily_budget) and self.spent_today + trade_usdt > self.config.daily_budget_usdt:
             self._set_state(
                 last_action="RISK_DAILY_BUDGET",
                 waiting_for_signal=False,
@@ -580,7 +585,7 @@ class Bot(Thread):
             time.sleep(10)
             return
 
-        if usdt < self.config.buy_usdt:
+        if trade_usdt <= 0 or usdt < trade_usdt:
             self._set_state(
                 last_action="RISK_NO_USDT",
                 waiting_for_signal=False,
@@ -593,7 +598,7 @@ class Bot(Thread):
             entry_price=price,
             awaiting_fresh_entry=False,
         )
-        self._buy()
+        self._buy(trade_usdt)
 
     def _compute_vortex_score(self, klines: list) -> tuple[float, float]:
         highs = [float(k[2]) for k in klines]
@@ -655,9 +660,9 @@ class Bot(Thread):
     # =========================
     # Trading actions
     # =========================
-    def _buy(self):
+    def _buy(self, trade_usdt: float):
         self._require_live()
-        order = self.binance.buy(self.config.symbol, self.config.buy_usdt)
+        order = self.binance.buy(self.config.symbol, trade_usdt)
 
         spent = float(order.get("cummulativeQuoteQty", 0.0))
         qty = float(order.get("executedQty", 0.0))
@@ -695,6 +700,21 @@ class Bot(Thread):
                 "entry_time": datetime.utcnow().isoformat() + "Z",
             },
         )
+
+    def _compute_trade_usdt(self, total_usdt: float) -> float:
+        if total_usdt <= 0:
+            return 0.0
+
+        capital_for_bot = total_usdt * self.config.capital_pct
+        trade_usdt = capital_for_bot * self.config.trade_pct
+
+        if trade_usdt < self.config.min_trade_usdt:
+            if capital_for_bot >= self.config.min_trade_usdt:
+                trade_usdt = self.config.min_trade_usdt
+            else:
+                return 0.0
+
+        return trade_usdt
 
     def _manage_open_position(self):
         self._require_live()

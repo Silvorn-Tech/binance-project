@@ -100,6 +100,13 @@ class TelegramNotifier:
                 return "—"
             return f"{value * 100:.{decimals}f}"
 
+        def limit_value(value, disabled: bool, suffix: str = ""):
+            if disabled:
+                return "∞"
+            if value is None:
+                return "—"
+            return f"{value}{suffix}"
+
         if state.trading_mode == TradingMode.LIVE and state.awaiting_fresh_entry:
             mode_label = "💰 LIVE (WAITING ENTRY)"
         else:
@@ -130,6 +137,8 @@ class TelegramNotifier:
         if state.trailing_enabled and state.trailing_max_price is not None:
             arm_price = state.trailing_max_price
 
+        cfg = state.config
+
         lines = [
             "📊 <b>BOT DASHBOARD</b>",
             "",
@@ -156,6 +165,10 @@ class TelegramNotifier:
             f"<b>Arm price:</b> {fmt(arm_price)}",
             f"<b>Stop price:</b> {fmt(state.stop_price)}",
             f"<b>Distance to stop:</b> {fmt(stop_distance)} %",
+            "",
+            "────────── <b>LIMITS</b> ────────────",
+            f"<b>Max trades/day:</b> {limit_value(getattr(cfg, 'max_buys_per_day', None), getattr(cfg, 'disable_max_buys_per_day', False))}",
+            f"<b>Daily budget:</b> {limit_value(getattr(cfg, 'daily_budget_usdt', None), getattr(cfg, 'disable_daily_budget', False), ' USDT')}",
             "",
         ]
 

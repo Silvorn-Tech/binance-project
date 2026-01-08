@@ -28,16 +28,27 @@ class BotBuilder:
         self._config.setdefault("trend_exit_enabled", True)
         self._config.setdefault("trend_sma_period", 25)
         self._config.setdefault("max_hold_seconds_without_new_high", 5 * 60)
+        self._config.setdefault("disable_max_buys_per_day", False)
+        self._config.setdefault("disable_daily_budget", False)
         return self
 
     def build(self) -> BotConfig:
+        if "bot_id" not in self._config and "profile" in self._config and "base_asset" in self._config:
+            bot_id = f"{self._config['profile']}_{self._config['base_asset'].lower()}"
+            self._config["bot_id"] = bot_id
+
         required_fields = [
+            "bot_id",
             "symbol",
             "base_asset",
             "profile",
-            "buy_usdt",
+            "capital_pct",
+            "trade_pct",
+            "min_trade_usdt",
             "max_buys_per_day",
             "daily_budget_usdt",
+            "disable_max_buys_per_day",
+            "disable_daily_budget",
             "sma_fast",
             "sma_slow",
             "trailing_pct",

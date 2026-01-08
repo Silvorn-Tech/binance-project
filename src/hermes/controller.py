@@ -30,6 +30,52 @@ from hermes.utils.report_writer import write_bot_report
 def escape_html(text: str) -> str:
     return html.escape(text, quote=False)
 
+EDIT_HELP_TEXT = (
+    "🆘 <b>Parameter help</b>\n\n"
+    "💰 <b>capital_pct</b>\n"
+    "Percentage of your total wallet balance assigned to this bot.\n"
+    "Example:\n"
+    "• Wallet = 1000 USDT\n"
+    "• capital_pct = 20%\n"
+    "→ Bot can use up to 200 USDT\n\n"
+    "📊 <b>trade_pct</b>\n"
+    "Percentage of the bot capital used per trade.\n"
+    "Example:\n"
+    "• Bot capital = 200 USDT\n"
+    "• trade_pct = 25%\n"
+    "→ Each trade uses ~50 USDT\n\n"
+    "📦 <b>min_trade_usdt</b>\n"
+    "Minimum amount per trade (Binance constraint).\n"
+    "Used to avoid orders rejected by the exchange.\n"
+    "⚠️ Recommended: ≥ 7 USDT\n\n"
+    "🔁 <b>max_buys_per_day</b>\n"
+    "Maximum number of buy operations per day.\n"
+    "Helps control overtrading.\n\n"
+    "• Can be disabled\n"
+    "• When disabled → unlimited trades\n\n"
+    "📉 <b>daily_budget_usdt</b>\n"
+    "Maximum total USDT spent per day.\n"
+    "Protects against bad market days.\n\n"
+    "• Can be disabled\n"
+    "• When disabled → no daily spending limit\n\n"
+    "📐 <b>trailing_pct</b>\n"
+    "Trailing stop percentage to protect profits.\n\n"
+    "• Lower = safer, faster exits\n"
+    "• Higher = more room for price movement\n\n"
+    "Examples:\n"
+    "• Sentinel → 1.0%\n"
+    "• Equilibrium → 1.5%\n"
+    "• Vortex → 3.0%\n\n"
+    "🚫 <b>Disable limits</b>\n"
+    "Disables:\n"
+    "• max_buys_per_day\n"
+    "• daily_budget_usdt\n\n"
+    "⚠️ Bot will trade without limits.\n\n"
+    "🔄 <b>symbol / base_asset</b>\n"
+    "Trading pair and base asset.\n"
+    "Changing this will restart the bot.\n"
+)
+
 
 class Controller:
     """
@@ -130,6 +176,7 @@ class Controller:
         keyboard = [
             [InlineKeyboardButton("🚀 Start new bot", callback_data="start_new_bot")],
             [InlineKeyboardButton("📊 Running bots", callback_data="status")],
+            [InlineKeyboardButton("🤖 Manage bots", callback_data="manage_menu")],
             [InlineKeyboardButton("📈 Reports", callback_data="reports_menu")],
             [InlineKeyboardButton("🛑 Stop a bot", callback_data="stop_menu")],
             [InlineKeyboardButton("ℹ️ Help", callback_data="help")],
@@ -141,6 +188,11 @@ class Controller:
 
         if not states:
             return "🤷 <b>No bots running</b>"
+
+        def limit_value(value, disabled: bool, suffix: str = "") -> str:
+            if disabled:
+                return "∞"
+            return f"{value}{suffix}"
 
         lines = ["📊 <b>Running bots</b>\n"]
         for state in states:
@@ -154,8 +206,11 @@ class Controller:
 
             lines.append(
                 f"🟢 <b>{state.symbol}</b> ({state.profile})\n"
-                f"• buy_usdt: {cfg.buy_usdt}\n"
-                f"• max_buys/day: {cfg.max_buys_per_day}\n"
+                f"• capital_pct: {cfg.capital_pct}\n"
+                f"• trade_pct: {cfg.trade_pct}\n"
+                f"• min_trade_usdt: {cfg.min_trade_usdt}\n"
+                f"• max_buys/day: {limit_value(cfg.max_buys_per_day, cfg.disable_max_buys_per_day)}\n"
+                f"• daily_budget: {limit_value(cfg.daily_budget_usdt, cfg.disable_daily_budget, ' USDT')}\n"
                 f"• trailing: {cfg.trailing_pct * 100:.2f} %\n"
                 f"• SMA: {cfg.sma_fast} / {cfg.sma_slow}\n"
                 f"• Status: <code>{escape_html(state.last_action)}</code>\n"
@@ -384,20 +439,30 @@ class Controller:
             f"<b>Profile:</b> {escape_html(pending['profile'])}\n"
             f"<b>Symbol:</b> {escape_html(pending['symbol'])}\n\n"
             "<b>Current configuration:</b>\n"
-            f"• buy_usdt: {config.buy_usdt}\n"
-            f"• max_buys_per_day: {config.max_buys_per_day}\n"
-            f"• daily_budget_usdt: {config.daily_budget_usdt}\n"
+            f"• capital_pct: {config.capital_pct}\n"
+            f"• trade_pct: {config.trade_pct}\n"
+            f"• min_trade_usdt: {config.min_trade_usdt}\n"
+            f"• max_buys_per_day: {'∞' if config.disable_max_buys_per_day else config.max_buys_per_day}\n"
+            f"• daily_budget_usdt: {'∞' if config.disable_daily_budget else f'{config.daily_budget_usdt} USDT'}\n"
             f"• sma_fast: {config.sma_fast}\n"
             f"• sma_slow: {config.sma_slow}\n"
             f"• trailing_pct: {config.trailing_pct}\n\n"
             "What do you want to do?"
         )
 
-        keyboard = [
-            [InlineKeyboardButton("✅ Start (default)", callback_data="confirm")],
-            [InlineKeyboardButton("✏️ Edit parameters", callback_data="edit")],
-            [InlineKeyboardButton("❌ Cancel", callback_data="cancel")],
-        ]
+        if pending.get("mode") == "manage":
+            bot_id = pending.get("bot_id", "")
+            keyboard = [
+                [InlineKeyboardButton("✅ Apply & restart", callback_data=f"manage_apply:{bot_id}")],
+                [InlineKeyboardButton("✏️ Edit parameters", callback_data="edit")],
+                [InlineKeyboardButton("⬅️ Back", callback_data=f"manage_bot:{bot_id}")],
+            ]
+        else:
+            keyboard = [
+                [InlineKeyboardButton("✅ Start (default)", callback_data="confirm")],
+                [InlineKeyboardButton("✏️ Edit parameters", callback_data="edit")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")],
+            ]
 
         await self._render(query=query, text=text, keyboard=keyboard)
 
@@ -496,6 +561,191 @@ class Controller:
             text = self._build_running_bots_text()
             keyboard = self._build_running_bots_keyboard()
             await self._render(query=query, text=text, keyboard=keyboard)
+            return
+
+        if action == "manage_menu":
+            states = self.bot_service.get_all_states()
+            if not states:
+                await self._render(
+                    query=query,
+                    text="🤷 <b>No bots running</b>",
+                    keyboard=[[InlineKeyboardButton("⬅️ Main menu", callback_data="main_menu")]],
+                )
+                return
+
+            text = "🤖 <b>Manage bots</b>\n\nSelect a bot to manage:"
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        f"🟢 {state.profile} | {state.symbol}",
+                        callback_data=f"manage_bot:{state.bot_id}",
+                    )
+                ]
+                for state in states
+            ]
+            keyboard.append([InlineKeyboardButton("⬅️ Main menu", callback_data="main_menu")])
+            await self._render(query=query, text=text, keyboard=keyboard)
+            return
+
+        if action.startswith("manage_bot:"):
+            bot_id = action.split(":", 1)[1]
+            state = self.bot_service.get_bot_state_by_id(bot_id)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+
+            text = (
+                "🤖 <b>Managing bot</b>\n\n"
+                f"<b>Bot:</b> <code>{escape_html(bot_id)}</code>\n"
+                f"<b>Profile:</b> <code>{escape_html(state.profile)}</code>\n"
+                f"<b>Symbol:</b> <code>{escape_html(state.symbol)}</code>"
+            )
+            keyboard = [
+                [InlineKeyboardButton("📊 View status", callback_data=f"dash_open:{state.symbol}")],
+                [InlineKeyboardButton("✏️ Edit config", callback_data=f"manage_edit:{bot_id}")],
+                [InlineKeyboardButton("🔁 Restart bot", callback_data=f"manage_restart:{bot_id}")],
+                [InlineKeyboardButton("🛑 Stop bot", callback_data=f"stop_confirm:{state.symbol}")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="manage_menu")],
+            ]
+            await self._render(query=query, text=text, keyboard=keyboard)
+            return
+
+        if action.startswith("manage_edit:"):
+            bot_id = action.split(":", 1)[1]
+            state = self.bot_service.get_bot_state_by_id(bot_id)
+            if not state or not state.config:
+                await query.answer("No config found", show_alert=True)
+                return
+
+            config = (
+                BotBuilder()
+                .with_symbol(state.symbol, state.base_asset)
+                .with_profile(state.profile)
+                .with_defaults()
+                .build()
+            )
+            config = replace(
+                config,
+                bot_id=state.config.bot_id,
+                capital_pct=state.config.capital_pct,
+                trade_pct=state.config.trade_pct,
+                min_trade_usdt=state.config.min_trade_usdt,
+                max_buys_per_day=state.config.max_buys_per_day,
+                daily_budget_usdt=state.config.daily_budget_usdt,
+                disable_max_buys_per_day=state.config.disable_max_buys_per_day,
+                disable_daily_budget=state.config.disable_daily_budget,
+                sma_fast=state.config.sma_fast,
+                sma_slow=state.config.sma_slow,
+                trailing_pct=state.config.trailing_pct,
+                kline_interval=state.config.kline_interval,
+                kline_limit=state.config.kline_limit,
+                cooldown_after_sell_seconds=state.config.cooldown_after_sell_seconds,
+                trend_exit_enabled=state.config.trend_exit_enabled,
+                trend_sma_period=state.config.trend_sma_period,
+                max_hold_seconds_without_new_high=state.config.max_hold_seconds_without_new_high,
+            )
+
+            pending = {
+                "mode": "manage",
+                "bot_id": bot_id,
+                "profile": state.profile,
+                "symbol": state.symbol,
+                "base_asset": state.base_asset,
+                "config": config,
+            }
+            self._pending_configs[chat_id] = pending
+            await self._show_config(query=query, pending=pending)
+            return
+
+        if action.startswith("manage_restart:"):
+            bot_id = action.split(":", 1)[1]
+            state = self.bot_service.get_bot_state_by_id(bot_id)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+
+            text = (
+                "🔁 <b>Restart bot</b>\n\n"
+                f"<b>Bot:</b> <code>{escape_html(bot_id)}</code>\n"
+                f"<b>Symbol:</b> <code>{escape_html(state.symbol)}</code>\n\n"
+                "This will stop and restart the bot."
+            )
+            keyboard = [
+                [InlineKeyboardButton("✅ Restart", callback_data=f"manage_restart_apply:{bot_id}")],
+                [InlineKeyboardButton("⬅️ Back", callback_data=f"manage_bot:{bot_id}")],
+            ]
+            await self._render(query=query, text=text, keyboard=keyboard)
+            return
+
+        if action.startswith("manage_restart_apply:"):
+            bot_id = action.split(":", 1)[1]
+            pending = self._pending_configs.get(chat_id)
+            config = pending["config"] if pending and pending.get("bot_id") == bot_id else None
+            if config is None:
+                state = self.bot_service.get_bot_state_by_id(bot_id)
+                config = state.config if state else None
+            if config is None:
+                await query.answer("No config found", show_alert=True)
+                return
+
+            await self._send_temp_message(
+                context=context,
+                chat_id=chat_id,
+                text="⏳ <b>Please wait…</b>\nRestarting bot.",
+                seconds=self._profile_ttl(config.profile, default=4),
+            )
+            try:
+                self.bot_service.restart_bot_with_config(bot_id, config)
+            except Exception as e:
+                await query.answer(f"❌ {str(e)}", show_alert=True)
+                return
+
+            state = self.bot_service.get_bot_state_by_id(bot_id)
+            if state:
+                notifier = self.bot_service.get_notifier(state.symbol)
+                await notifier.render_bot_dashboard(state, force=True)
+
+            text, keyboard = self._main_menu_payload()
+            await self._safe_edit_menu(
+                chat_id=chat_id,
+                context=context,
+                text=text,
+                keyboard=keyboard,
+            )
+            return
+
+        if action.startswith("manage_apply:"):
+            bot_id = action.split(":", 1)[1]
+            pending = self._pending_configs.get(chat_id)
+            if not pending or pending.get("bot_id") != bot_id:
+                await query.answer("No pending config", show_alert=True)
+                return
+
+            await self._send_temp_message(
+                context=context,
+                chat_id=chat_id,
+                text="⏳ <b>Please wait…</b>\nApplying changes.",
+                seconds=self._profile_ttl(pending.get("profile"), default=4),
+            )
+            try:
+                self.bot_service.restart_bot_with_config(bot_id, pending["config"])
+            except Exception as e:
+                await query.answer(f"❌ {str(e)}", show_alert=True)
+                return
+
+            state = self.bot_service.get_bot_state_by_id(bot_id)
+            notifier = self.bot_service.get_notifier(state.symbol) if state else None
+            if notifier and state:
+                await notifier.render_bot_dashboard(state, force=True)
+
+            self._pending_configs.pop(chat_id, None)
+            text, keyboard = self._main_menu_payload()
+            await self._safe_edit_menu(
+                chat_id=chat_id,
+                context=context,
+                text=text,
+                keyboard=keyboard,
+            )
             return
 
         if action == "stop_menu":
@@ -609,14 +859,102 @@ class Controller:
             return
 
         if action == "edit":
+            pending = self._pending_configs.get(chat_id)
+            if pending:
+                pending.pop("edit_step", None)
+                pending.pop("edit_param", None)
             text = "✏️ <b>Edit parameters</b>\n\nSelect the parameter you want to change:"
             keyboard = [
-                [InlineKeyboardButton("💰 buy_usdt", callback_data="edit_param:buy_usdt")],
+                [InlineKeyboardButton("🆘 Help", callback_data="edit_help")],
+                [InlineKeyboardButton("💰 capital_pct", callback_data="edit_param:capital_pct")],
+                [InlineKeyboardButton("🧮 trade_pct", callback_data="edit_param:trade_pct")],
+                [InlineKeyboardButton("🧱 min_trade_usdt", callback_data="edit_param:min_trade_usdt")],
                 [InlineKeyboardButton("🔁 max_buys_per_day", callback_data="edit_param:max_buys_per_day")],
                 [InlineKeyboardButton("📊 daily_budget_usdt", callback_data="edit_param:daily_budget_usdt")],
                 [InlineKeyboardButton("📉 trailing_pct", callback_data="edit_param:trailing_pct")],
+                [InlineKeyboardButton("🚫 Disable limits", callback_data="disable_limits_menu")],
                 [InlineKeyboardButton("🔄 symbol / base_asset", callback_data="edit_param:symbol")],
-                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="edit_back_config")],
+            ]
+            await self._render(query=query, text=text, keyboard=keyboard)
+            return
+
+        if action == "edit_help":
+            await self._render(
+                query=query,
+                text=EDIT_HELP_TEXT,
+                keyboard=[[InlineKeyboardButton("⬅️ Back", callback_data="edit")]],
+            )
+            return
+
+        if action == "disable_limits_menu":
+            pending = self._pending_configs.get(chat_id)
+            if not pending:
+                await self._render(
+                    query=query,
+                    text="❌ No pending bot configuration.",
+                    keyboard=[[InlineKeyboardButton("⬅️ Main menu", callback_data="main_menu")]],
+                )
+                return
+
+            config = pending["config"]
+            text = "🚫 <b>Disable limits</b>\n\nSelect the limits you want to disable:"
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        f"{'✅' if config.disable_max_buys_per_day else '☑️'} Max trades/day",
+                        callback_data="toggle_disable_max_buys",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        f"{'✅' if config.disable_daily_budget else '☑️'} Daily budget",
+                        callback_data="toggle_disable_daily_budget",
+                    )
+                ],
+                [InlineKeyboardButton("⬅️ Back", callback_data="edit")],
+            ]
+            await self._render(query=query, text=text, keyboard=keyboard)
+            return
+
+        if action in {"toggle_disable_max_buys", "toggle_disable_daily_budget"}:
+            pending = self._pending_configs.get(chat_id)
+            if not pending:
+                await self._render(
+                    query=query,
+                    text="❌ No pending bot configuration.",
+                    keyboard=[[InlineKeyboardButton("⬅️ Main menu", callback_data="main_menu")]],
+                )
+                return
+
+            config = pending["config"]
+            if action == "toggle_disable_max_buys":
+                config = replace(
+                    config,
+                    disable_max_buys_per_day=not config.disable_max_buys_per_day,
+                )
+            else:
+                config = replace(
+                    config,
+                    disable_daily_budget=not config.disable_daily_budget,
+                )
+
+            pending["config"] = config
+            text = "🚫 <b>Disable limits</b>\n\nSelect the limits you want to disable:"
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        f"{'✅' if config.disable_max_buys_per_day else '☑️'} Max trades/day",
+                        callback_data="toggle_disable_max_buys",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        f"{'✅' if config.disable_daily_budget else '☑️'} Daily budget",
+                        callback_data="toggle_disable_daily_budget",
+                    )
+                ],
+                [InlineKeyboardButton("⬅️ Back", callback_data="edit")],
             ]
             await self._render(query=query, text=text, keyboard=keyboard)
             return
@@ -647,7 +985,7 @@ class Controller:
                         "Example:\n"
                         "<code>SOLUSDT SOL</code>"
                     ),
-                    keyboard=[[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]],
+                    keyboard=[[InlineKeyboardButton("⬅️ Back", callback_data="edit")]],
                 )
                 return
 
@@ -659,8 +997,18 @@ class Controller:
                     f"Current value: <code>{escape_html(str(current_value))}</code>\n\n"
                     "Send the new value:"
                 ),
-                keyboard=[[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]],
+                keyboard=[[InlineKeyboardButton("⬅️ Back", callback_data="edit")]],
             )
+            return
+
+        if action == "edit_back_config":
+            pending = self._pending_configs.get(chat_id)
+            if pending:
+                await self._show_config(query=query, pending=pending)
+                return
+
+            text, keyboard = self._main_menu_payload()
+            await self._render(query=query, text=text, keyboard=keyboard)
             return
 
         if action == "confirm":
@@ -1000,7 +1348,15 @@ class Controller:
             try:
                 current_value = getattr(pending["config"], param)
 
-                if isinstance(current_value, int):
+                if isinstance(current_value, bool):
+                    normalized = text.strip().lower()
+                    if normalized in {"true", "yes", "1", "on"}:
+                        new_value = True
+                    elif normalized in {"false", "no", "0", "off"}:
+                        new_value = False
+                    else:
+                        raise ValueError("Invalid boolean")
+                elif isinstance(current_value, int):
                     new_value = int(text)
                 elif isinstance(current_value, float):
                     new_value = float(text)
