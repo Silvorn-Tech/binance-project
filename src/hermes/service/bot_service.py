@@ -1,7 +1,11 @@
-# src/service/bot_service.py
+import time
 from loguru import logger
+from datetime import datetime
+from pathlib import Path
+import csv
 
 from hermes.service.bot_builder import BotBuilder
+from hermes.service.bot_state import BotRuntimeState
 from hermes.utils.bot import Bot
 from hermes.providers.binance import Binance
 from hermes.providers.Telegram import TelegramNotifier
@@ -13,32 +17,43 @@ class BotService:
     Application service responsible for managing bot lifecycles.
     """
 
-    def __init__(
-        self,
-        binance: Binance,
-        notifier: TelegramNotifier,
-    ):
+    def __init__(self, binance: Binance, notifier: TelegramNotifier):
+        self._bots: dict[str, Bot] = {}
+        self._states: dict[str, BotRuntimeState] = {}
+
         self.binance = binance
         self.notifier = notifier
 
-        # Active bots registry: symbol -> Bot
-        self._bots: dict[str, Bot] = {}
-
         logger.info("🧠 BotService initialized")
 
+
     # =========================
-    # Public API
+    # BOT LIFECYCLE
     # =========================
-    def start_bot_from_config(self, config: BotConfig):
-        symbol = config.symbol
+    def start_bot_from_config(self, config: BotConfig) -> None:
+        symbol = config.symbol.upper()
 
         if symbol in self._bots:
             raise RuntimeError(f"Bot already running for {symbol}")
 
+        logger.info(
+            "🚀 Starting bot | symbol=%s | profile=%s",
+            symbol,
+            config.profile,
+        )
+
+        state = BotRuntimeState(
+            symbol=config.symbol,
+            profile=config.profile,
+            trailing_pct=config.trailing_pct,
+        )
+
+        self._states[symbol] = state
+
         bot = Bot(
             config=config,
             binance=self.binance,
-            notifier=self.notifier,
+            state=state,
         )
 
         bot.start()
@@ -46,37 +61,41 @@ class BotService:
 
     def stop_bot(self, symbol: str) -> None:
         symbol = symbol.upper()
-
         bot = self._bots.get(symbol)
+
         if not bot:
             raise RuntimeError(f"No running bot for {symbol}")
 
-        logger.warning(f"🛑 Stopping bot | symbol={symbol}")
+        logger.warning("🛑 Stopping bot | symbol=%s", symbol)
 
         bot.stop()
         bot.join(timeout=10)
 
         del self._bots[symbol]
+        self._states.pop(symbol, None)
 
-        self.notifier.send(
-            f"🛑 BOT STOPPED\n"
-            f"Symbol: {symbol}"
-        )
 
     def restart_bot(self, symbol: str, base_asset: str, profile: str) -> None:
         symbol = symbol.upper()
 
         logger.info(
-            f"♻️ Restarting bot | symbol={symbol} | profile={profile}"
+            "♻️ Restarting bot | symbol=%s | profile=%s",
+            symbol,
+            profile,
         )
 
         if symbol in self._bots:
             self.stop_bot(symbol)
 
-        self.start_bot(symbol, base_asset, profile)
+        config = (
+            BotBuilder()
+            .with_symbol(symbol, base_asset)
+            .with_profile(profile)
+            .with_defaults()
+            .build()
+        )
 
-    def list_bots(self) -> list[str]:
-        return list(self._bots.keys())
+        self.start_bot_from_config(config)
 
     def stop_all(self) -> None:
         logger.warning("🛑 Stopping ALL bots")
@@ -84,3 +103,61 @@ class BotService:
         for symbol in list(self._bots.keys()):
             self.stop_bot(symbol)
 
+    # =========================
+    # QUERIES
+    # =========================
+    def list_bots(self) -> list[str]:
+        return list(self._bots.keys())
+
+    def get_bot_state(self, symbol: str) -> BotRuntimeState | None:
+        return self._states.get(symbol.upper())
+
+    def get_all_states(self) -> list[BotRuntimeState]:
+        return list(self._states.values())
+
+    def get_notifier(self, symbol: str) -> TelegramNotifier:
+        # All bots share the same notifier (for now)
+        return self.notifier
+
+    def get_any_notifier(self) -> TelegramNotifier:
+        return self.notifier
+
+    # =========================
+    # REPORTS
+    # =========================
+    def generate_global_report_csv(self) -> str | None:
+        if not self._states:
+            return None
+
+        reports_dir = Path("reports")
+        reports_dir.mkdir(exist_ok=True)
+
+        date = datetime.now().strftime("%Y-%m-%d")
+        file_path = reports_dir / f"GLOBAL_{date}.csv"
+
+        with open(file_path, "w", newline="") as f:
+            writer = csv.writer(f)
+
+            writer.writerow([
+                "symbol",
+                "profile",
+                "running",
+                "total_pnl_usdt",
+                "buys_today",
+                "spent_today",
+                "last_action",
+            ])
+
+            for state in self._states.values():
+                writer.writerow([
+                    state.symbol,
+                    state.profile,
+                    state.running,
+                    f"{state.total_pnl_usdt:.4f}",
+                    state.buys_today,
+                    f"{state.spent_today:.2f}",
+                    state.last_action,
+                ])
+
+        logger.info("📄 Global report generated | %s", file_path)
+        return str(file_path)

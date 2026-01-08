@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 from loguru import logger
+from telegram import Bot
+
 
 from hermes.providers.binance import Binance
 from hermes.providers.Telegram import TelegramNotifier
@@ -52,8 +54,10 @@ def main() -> None:
         api_secret=binance_api_secret,
     )
 
+    telegram_bot = Bot(token=telegram_token)
+
     notifier = TelegramNotifier(
-        bot_token=telegram_token,
+        bot=telegram_bot,
         chat_id=int(telegram_chat_id),
     )
 

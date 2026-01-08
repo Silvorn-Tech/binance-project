@@ -1,0 +1,11 @@
+field,value
+symbol,ETHUSDT
+profile,sentinel
+running,True
+total_pnl_usdt,0.0000
+buys_today,0
+spent_today,0.00
+last_action,ARM_INIT
+entry_price,
+arm_price,3160.03
+last_price,3160.03

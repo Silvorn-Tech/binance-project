@@ -1,4 +1,7 @@
 pyproject.toml
+src/hermes/__init__.py
+src/hermes/cli.py
+src/hermes/controller.py
 src/hermes.egg-info/PKG-INFO
 src/hermes.egg-info/SOURCES.txt
 src/hermes.egg-info/dependency_links.txt
@@ -8,11 +11,16 @@ src/hermes.egg-info/top_level.txt
 src/hermes/providers/Telegram.py
 src/hermes/providers/__init__.py
 src/hermes/providers/binance.py
+src/hermes/reports/daily_recorder.py
+src/hermes/reports/report_manager.py
+src/hermes/reports/trade_recorder.py
 src/hermes/service/__init__.py
 src/hermes/service/bot_builder.py
 src/hermes/service/bot_service.py
+src/hermes/service/bot_state.py
 src/hermes/service/profiles.py
 src/hermes/utils/__init__.py
 src/hermes/utils/bot.py
 src/hermes/utils/bot_config.py
 src/hermes/utils/logging_config.py
+src/hermes/utils/report_writer.py
