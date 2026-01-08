@@ -1,24 +1,34 @@
-from datetime import datetime
+from __future__ import annotations
+
+from dataclasses import replace
 from pathlib import Path
+import html
+import time
 
 from loguru import logger
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder,
-    CommandHandler,
     CallbackQueryHandler,
+    CommandHandler,
     ContextTypes,
     MessageHandler,
     filters,
 )
-from telegram.error import BadRequest
-from dataclasses import replace
 
-from hermes.providers.Telegram import escape_md
-from hermes.service.bot_service import BotService
+from telegram.error import BadRequest, RetryAfter
+import asyncio
+
 from hermes.service.bot_builder import BotBuilder
+from hermes.service.bot_service import BotService
+from hermes.service.bot_state import BotRuntimeState
+from hermes.utils.trading_mode import TradingMode
 from hermes.utils.report_writer import write_bot_report
-from telegram.constants import ParseMode
+
+
+def escape_html(text: str) -> str:
+    return html.escape(text, quote=False)
 
 
 class Controller:
@@ -27,10 +37,24 @@ class Controller:
     Entry point to application logic via Telegram commands.
     """
 
+    _PROFILE_TTL_SECONDS = {
+        "sentinel": 5,
+        "equilibrium": 4,
+        "vortex": 3,
+    }
+    _VORTEX_MIN_TRADES = 30
+    _VORTEX_CONFIDENCE_THRESHOLD = 0.55
+    _LIVE_DRAWDOWN_LIMIT = 0.05
+
     def __init__(self, bot_service: BotService, telegram_token: str):
         self.bot_service = bot_service
         self.telegram_token = telegram_token
         self._pending_configs: dict[int, dict] = {}
+        self._menu_message_id: dict[int, int] = {}
+        self._last_query: dict[int, object] = {}
+
+
+
 
     # =========================
     # Bootstrap
@@ -38,11 +62,16 @@ class Controller:
     def start(self) -> None:
         app = ApplicationBuilder().token(self.telegram_token).build()
 
-        app.job_queue.run_repeating(
-            self._auto_refresh_dashboards,
-            interval=5,
-            first=5,
-        )
+        # JobQueue may be None depending on PTB extras installation
+        if app.job_queue is not None:
+            app.job_queue.run_repeating(
+                self._auto_refresh_dashboards,
+                interval=15,
+                first=10,
+            )
+
+        else:
+            logger.warning("⚠️ JobQueue not available. Auto-refresh dashboards disabled.")
 
         app.add_handler(CommandHandler("start", self.start_bot))
         app.add_handler(CommandHandler("stop", self.stop_bot))
@@ -53,41 +82,51 @@ class Controller:
         app.add_handler(CommandHandler("cancel", self.cancel))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
         app.add_handler(CallbackQueryHandler(self.on_button))
+        app.add_error_handler(self._on_error)
 
         logger.info("📡 Telegram controller started")
         app.run_polling()
 
-    # =========================
-    # Render helper
-    # =========================
-    async def _render(self, *, message=None, query=None, text: str, keyboard):
-        safe_text = escape_md(text)
+    async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        err = context.error
+        if isinstance(err, (TimedOut, NetworkError)):
+            logger.warning("Telegram network error: %s", err)
+            return
+        logger.exception("Unhandled Telegram error", exc_info=err)
 
+    # =========================
+    # Render helper (HTML)
+    # =========================
+    async def _render(self, *, query, text: str, keyboard):
         try:
-            if query:
-                await query.edit_message_text(
-                    text=safe_text,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                )
-            elif message:
-                await message.reply_text(
-                    text=safe_text,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                )
+            await query.edit_message_text(
+                text=text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+
+        except RetryAfter as e:
+            logger.warning(
+                f"⏳ Flood control hit (retry_after={e.retry_after}s). Skipping render."
+            )
+            return
+
         except BadRequest as e:
             if "Message is not modified" in str(e):
-                logger.debug("Render skipped: message not modified")
                 return
-            raise
+            logger.warning(f"BadRequest on render: {e}")
+
 
 
     # =========================
-    # MAIN MENU (single source)
+    # MAIN MENU
     # =========================
     def _main_menu_payload(self):
-        text = "🤖 *HERMES is online*\n\nSelect an option:"
+        text = (
+            "🤖 <b>HERMES is online</b>\n\n"
+            "Select an option:"
+        )
         keyboard = [
             [InlineKeyboardButton("🚀 Start new bot", callback_data="start_new_bot")],
             [InlineKeyboardButton("📊 Running bots", callback_data="status")],
@@ -97,73 +136,233 @@ class Controller:
         ]
         return text, keyboard
 
-    async def _send_main_menu(self, *, message):
-        """
-        IMPORTANT:
-        Use this when returning from FILE actions (reports).
-        This creates a NEW message (does not edit old one).
-        """
+    def _build_running_bots_text(self) -> str:
+        states = self.bot_service.get_all_states()
+
+        if not states:
+            return "🤷 <b>No bots running</b>"
+
+        lines = ["📊 <b>Running bots</b>\n"]
+        for state in states:
+            cfg = state.config
+            if cfg is None:
+                lines.append(
+                    f"🟢 <b>{state.symbol}</b> ({state.profile})\n"
+                    f"• Status: <code>{escape_html(state.last_action)}</code>\n"
+                )
+                continue
+
+            lines.append(
+                f"🟢 <b>{state.symbol}</b> ({state.profile})\n"
+                f"• buy_usdt: {cfg.buy_usdt}\n"
+                f"• max_buys/day: {cfg.max_buys_per_day}\n"
+                f"• trailing: {cfg.trailing_pct * 100:.2f} %\n"
+                f"• SMA: {cfg.sma_fast} / {cfg.sma_slow}\n"
+                f"• Status: <code>{escape_html(state.last_action)}</code>\n"
+            )
+
+        return "\n".join(lines)
+
+    def _build_running_bots_keyboard(self) -> list[list[InlineKeyboardButton]]:
+        rows: list[list[InlineKeyboardButton]] = []
+        for state in self.bot_service.get_all_states():
+            rows.append(
+                [InlineKeyboardButton(f"📊 {state.symbol}", callback_data=f"dash_open:{state.symbol}")]
+            )
+
+        rows.append([InlineKeyboardButton("➕ Start new bot", callback_data="start_new_bot")])
+        rows.append([InlineKeyboardButton("⬅️ Main menu", callback_data="main_menu")])
+        return rows
+
+    async def _send_main_menu(self, *, chat_id, context):
         text, keyboard = self._main_menu_payload()
-        await message.reply_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN_V2,
+        await self._safe_edit_menu(
+            chat_id=chat_id,
+            context=context,
+            text=text,
+            keyboard=keyboard,
         )
 
+    async def _safe_edit_menu(self, *, chat_id, context, text: str, keyboard):
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=self._menu_message_id[chat_id],
+                text=text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                return
+            raise
+
+    def _profile_ttl(self, profile: str | None, default: int) -> int:
+        if not profile:
+            return default
+        return self._PROFILE_TTL_SECONDS.get(profile, default)
+
+    def _stop_wait_text(self, state: BotRuntimeState | None) -> str:
+        if state is None:
+            return "⏳ <b>Please wait…</b>\nStopping bot safely."
+        return (
+            "⏳ <b>Please wait…</b>\n"
+            f"Stopping bot safely.\nLast action: <code>{escape_html(state.last_action)}</code>"
+        )
+
+    def _compute_vortex_confidence(self, state: BotRuntimeState) -> tuple[float, float, float, float]:
+        trades = state.trades_count or 0
+        win_rate = (state.wins / trades) if trades else 0.0
+
+        avg_win = (state.total_win / state.wins) if state.wins else 0.0
+        avg_loss = (state.total_loss / state.losses) if state.losses else 0.0
+
+        expectancy = (avg_win * win_rate) - (avg_loss * (1 - win_rate))
+
+        if avg_loss > 0:
+            normalized_expectancy = min(max(expectancy / avg_loss, 0.0), 1.0)
+        else:
+            normalized_expectancy = 1.0 if expectancy > 0 else 0.0
+
+        recent_pnls = state.recent_pnls[-10:]
+        recent_sum = sum(recent_pnls) if recent_pnls else 0.0
+        denom = (avg_loss if avg_loss > 0 else 1.0) * max(len(recent_pnls), 1)
+        ratio = max(min(recent_sum / denom, 1.0), -1.0)
+        recent_consistency = (ratio + 1.0) / 2.0
+
+        confidence = (
+            0.5 * win_rate +
+            0.3 * normalized_expectancy +
+            0.2 * recent_consistency
+        )
+        confidence = min(max(confidence, 0.0), 1.0)
+
+        return confidence, win_rate, expectancy, state.max_drawdown
+
+    async def _send_vortex_confirmation(self, *, context, chat_id: int, state: BotRuntimeState):
+        confidence, win_rate, expectancy, max_drawdown = self._compute_vortex_confidence(state)
+        expectancy_pct = 0.0
+        if state.virtual_capital > 0:
+            expectancy_pct = (expectancy / state.virtual_capital) * 100
+
+        text = (
+            "🧠 <b>VORTEX READY — REAL CAPITAL CONFIRMATION</b>\n\n"
+            "<b>Simulation summary:</b>\n"
+            f"• Trades executed: {state.trades_count}\n"
+            f"• Win rate: {win_rate * 100:.1f} %\n"
+            f"• Expectancy: {expectancy_pct:+.2f} %\n"
+            f"• Max drawdown: {max_drawdown * 100:.1f} %\n"
+            f"• Virtual PnL: {state.virtual_pnl:+.2f} USDT\n\n"
+            f"📊 <b>Confidence score:</b> {confidence * 100:.0f} %\n\n"
+            "⚠️ <i>This is NOT a guarantee.</i>\n"
+            "This score is based on historical simulated performance.\n\n"
+            "Do you want to enable REAL trading with limited capital?"
+        )
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("✅ Yes, invest real capital", callback_data=f"vortex_live_yes:{state.symbol}")],
+                    [InlineKeyboardButton("❌ No, keep simulating", callback_data=f"vortex_live_no:{state.symbol}")],
+                ]
+            ),
+        )
+
+    async def _send_temp_message(
+        self,
+        *,
+        context: ContextTypes.DEFAULT_TYPE,
+        chat_id: int,
+        text: str,
+        seconds: int = 3,
+    ):
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+
+        async def _auto_delete():
+            await asyncio.sleep(seconds)
+            try:
+                await msg.delete()
+            except Exception:
+                return
+
+        asyncio.create_task(_auto_delete())
+
+    async def _send_deletable_message(
+        self,
+        *,
+        context: ContextTypes.DEFAULT_TYPE,
+        chat_id: int,
+        text: str,
+        delete_after: int | None = None,
+    ):
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🗑️ Delete", callback_data="delete_self")]]
+            ),
+        )
+
+        if delete_after is None:
+            return
+
+        async def _auto_delete():
+            await asyncio.sleep(delete_after)
+            try:
+                await msg.delete()
+            except Exception:
+                return
+
+        asyncio.create_task(_auto_delete())
+
+
     # =========================
-    # /start command
+    # /start
     # =========================
     async def start_bot(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
         args = context.args
 
-        if not args:
-            text, keyboard = self._main_menu_payload()
-            await self._render(message=update.message, text=text, keyboard=keyboard)
-            return
+        text, keyboard = self._main_menu_payload()
 
-        # Wizard start
-        if len(args) == 1 and args[0].lower() == "bot":
-            await self._start_profile_selector(message=update.message)
-            return
-
-        # Power user: /start <profile> <SYMBOL> <BASE_ASSET>
-        try:
-            if len(args) != 3:
-                raise ValueError(
-                    "Usage:\n/start bot\nOR\n/start <profile> <SYMBOL> <BASE_ASSET>"
-                )
-
-            profile, symbol, base_asset = args
-
-            config = (
-                BotBuilder()
-                .with_symbol(symbol, base_asset)
-                .with_profile(profile)
-                .with_defaults()
-                .build()
+        # 👇 Crear mensaje base SOLO UNA VEZ
+        if chat_id not in self._menu_message_id:
+            msg = await update.message.reply_text(
+                text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            self._menu_message_id[chat_id] = msg.message_id
+        else:
+            await self._safe_edit_menu(
+                chat_id=chat_id,
+                context=context,
+                text=text,
+                keyboard=keyboard,
             )
 
-            self._pending_configs[chat_id] = {
-                "profile": profile,
-                "symbol": symbol,
-                "base_asset": base_asset,
-                "config": config,
-                "step": "ready",
-            }
+        return
 
-            await self._show_config(message=update.message, pending=self._pending_configs[chat_id])
-
-        except Exception as e:
-            logger.exception(e)
-            await update.message.reply_text(f"❌ Error: {e}")
 
     # =========================
     # Profile selector
     # =========================
-    async def _start_profile_selector(self, *, message=None, query=None):
+    async def _start_profile_selector(self, *, query=None):
         text = (
-            "⚡ *HERMES — Select a bot profile*\n\n"
+            "⚡ <b>HERMES — Select a bot profile</b>\n\n"
             "Choose the risk profile you want to use:"
         )
         keyboard = [
@@ -172,19 +371,19 @@ class Controller:
             [InlineKeyboardButton("🌪️ Vortex (Aggressive)", callback_data="profile:vortex")],
             [InlineKeyboardButton("⬅️ Main menu", callback_data="main_menu")],
         ]
-        await self._render(message=message, query=query, text=text, keyboard=keyboard)
+        await self._render(query=query, text=text, keyboard=keyboard)
 
     # =========================
     # Show config
     # =========================
-    async def _show_config(self, *, message=None, query=None, pending: dict):
+    async def _show_config(self, *, query=None, pending: dict):
         config = pending["config"]
 
         text = (
-            "⚡ *HERMES — Bot Configuration*\n\n"
-            f"*Profile:* {pending['profile']}\n"
-            f"*Symbol:* {pending['symbol']}\n\n"
-            "🧩 *Current configuration:*\n"
+            "⚡ <b>HERMES — Bot Configuration</b>\n\n"
+            f"<b>Profile:</b> {escape_html(pending['profile'])}\n"
+            f"<b>Symbol:</b> {escape_html(pending['symbol'])}\n\n"
+            "<b>Current configuration:</b>\n"
             f"• buy_usdt: {config.buy_usdt}\n"
             f"• max_buys_per_day: {config.max_buys_per_day}\n"
             f"• daily_budget_usdt: {config.daily_budget_usdt}\n"
@@ -200,14 +399,14 @@ class Controller:
             [InlineKeyboardButton("❌ Cancel", callback_data="cancel")],
         ]
 
-        await self._render(message=message, query=query, text=text, keyboard=keyboard)
+        await self._render(query=query, text=text, keyboard=keyboard)
 
     # =========================
     # Reports menu
     # =========================
     async def _show_reports_menu(self, *, query):
         text = (
-            "📈 *Reports*\n\n"
+            "📈 <b>Reports</b>\n\n"
             "Select the report you want to generate:"
         )
         keyboard = [
@@ -224,61 +423,45 @@ class Controller:
         query = update.callback_query
         await query.answer()
         chat_id = query.message.chat.id
+
+        self._last_query[chat_id] = query
+
         action = query.data
 
-        # =========================
-        # MAIN MENU (edit OK)
-        # =========================
         if action == "main_menu":
             text, keyboard = self._main_menu_payload()
             await self._render(query=query, text=text, keyboard=keyboard)
             return
 
-        # =========================
-        # REPORTS MENU
-        # =========================
         if action == "reports_menu":
             await self._show_reports_menu(query=query)
             return
 
-        # =========================
-        # HELP
-        # =========================
         if action == "help":
             text = (
-                "🤖 *HERMES — Trading Bot Assistant*\n\n"
+                "🤖 <b>HERMES — Trading Bot Assistant</b>\n\n"
                 "Welcome! 👋\n\n"
-                "🚀 *How to start (recommended)*\n"
-                "1) Type `/start`\n"
-                "2) Press *Start new bot*\n"
-                "3) Choose a *risk profile*\n"
+                "<b>How to start (recommended)</b>\n"
+                "1) Type /start\n"
+                "2) Press Start new bot\n"
+                "3) Choose a risk profile\n"
                 "4) Select the crypto pair\n"
-                "5) Review the configuration and press *Start*\n\n"
-                "🧠 *Commands*\n"
-                "`/start` → Open main menu\n"
-                "`/status` → See running bots\n"
-                "`/stop <SYMBOL>` → Stop a bot\n"
+                "5) Review the configuration and press Start\n\n"
+                "<b>Commands</b>\n"
+                "/start → Open main menu\n"
+                "/status → See running bots\n"
+                "/stop &lt;SYMBOL&gt; → Stop a bot\n"
             )
             keyboard = [[InlineKeyboardButton("⬅️ Main menu", callback_data="main_menu")]]
             await self._render(query=query, text=text, keyboard=keyboard)
             return
 
-        # =========================
-        # STATUS
-        # =========================
         if action == "status":
-            bots = self.bot_service.list_bots()
-            text = "🤷 No bots running" if not bots else "📊 *Running bots:*\n\n" + "\n".join(f"• `{b}`" for b in bots)
-            keyboard = [
-                [InlineKeyboardButton("➕ Start new bot", callback_data="start_new_bot")],
-                [InlineKeyboardButton("⬅️ Main menu", callback_data="main_menu")],
-            ]
+            text = self._build_running_bots_text()
+            keyboard = self._build_running_bots_keyboard()
             await self._render(query=query, text=text, keyboard=keyboard)
             return
 
-        # =========================
-        # STOP MENU
-        # =========================
         if action == "stop_menu":
             bots = self.bot_service.list_bots()
             if not bots:
@@ -291,18 +474,14 @@ class Controller:
 
             keyboard = [[InlineKeyboardButton(f"🛑 Stop {b}", callback_data=f"stop_confirm:{b}")] for b in bots]
             keyboard.append([InlineKeyboardButton("⬅️ Main menu", callback_data="main_menu")])
-
             await self._render(query=query, text="🛑 Select a bot to stop:", keyboard=keyboard)
             return
 
-        # =========================
-        # STOP CONFIRM
-        # =========================
         if action.startswith("stop_confirm:"):
-            symbol = action.split(":")[1]
+            symbol = action.split(":", 1)[1]
             text = (
-                "⚠️ *Confirm stop bot*\n\n"
-                f"*Symbol:* `{symbol}`\n\n"
+                "⚠️ <b>Confirm stop bot</b>\n\n"
+                f"<b>Symbol:</b> <code>{escape_html(symbol)}</code>\n\n"
                 "This action will stop the bot immediately."
             )
             keyboard = [
@@ -312,34 +491,57 @@ class Controller:
             await self._render(query=query, text=text, keyboard=keyboard)
             return
 
-        # =========================
-        # STOP EXECUTE
-        # =========================
         if action.startswith("stop_execute:"):
-            symbol = action.split(":")[1]
-            self.bot_service.stop_bot(symbol)
+            symbol = action.split(":", 1)[1]
+            state = self.bot_service.get_bot_state(symbol)
+            wait_seconds = self._profile_ttl(state.profile if state else None, default=3)
 
-            text = f"🛑 Bot stopped successfully\n\n*Symbol:* `{symbol}`"
-            keyboard = [
-                [InlineKeyboardButton("➕ Create another bot", callback_data="start_new_bot")],
-                [InlineKeyboardButton("📊 View running bots", callback_data="status")],
-                [InlineKeyboardButton("⬅️ Main menu", callback_data="main_menu")],
-            ]
-            await self._render(query=query, text=text, keyboard=keyboard)
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+
+            await self._send_temp_message(
+                context=context,
+                chat_id=chat_id,
+                text=self._stop_wait_text(state),
+                seconds=wait_seconds,
+            )
+
+            try:
+                self.bot_service.stop_bot(symbol)
+            except Exception as e:
+                await query.answer(f"❌ {str(e)}", show_alert=True)
+                return
+
+            await self._send_deletable_message(
+                context=context,
+                chat_id=chat_id,
+                text=(
+                    "🔴 <b>Bot stopped successfully</b>\n\n"
+                    f"<b>Symbol:</b> <code>{escape_html(symbol)}</code>"
+                ),
+                delete_after=self._profile_ttl(state.profile if state else None, default=10),
+            )
+
+            text, keyboard = self._main_menu_payload()
+            await self._safe_edit_menu(
+                chat_id=chat_id,
+                context=context,
+                text=text,
+                keyboard=keyboard,
+            )
             return
 
-        # =========================
-        # START FLOW
-        # =========================
         if action == "start_new_bot":
             await self._start_profile_selector(query=query)
             return
 
         if action.startswith("profile:"):
-            profile = action.split(":")[1]
+            profile = action.split(":", 1)[1]
             self._pending_configs[chat_id] = {"profile": profile, "step": "awaiting_symbol"}
 
-            text = f"✅ Profile selected: *{profile}*\n\nSelect the crypto to trade:"
+            text = f"✅ Profile selected: <b>{escape_html(profile)}</b>\n\nSelect the crypto to trade:"
             keyboard = [
                 [InlineKeyboardButton("🟣 ETH / USDT", callback_data="symbol:ETHUSDT:ETH")],
                 [InlineKeyboardButton("🟢 SOL / USDT", callback_data="symbol:SOLUSDT:SOL")],
@@ -370,11 +572,8 @@ class Controller:
             await self._show_config(query=query, pending=pending)
             return
 
-        # =========================
-        # EDIT PARAMETERS
-        # =========================
         if action == "edit":
-            text = "✏️ *Edit parameters*\n\nSelect the parameter you want to change:"
+            text = "✏️ <b>Edit parameters</b>\n\nSelect the parameter you want to change:"
             keyboard = [
                 [InlineKeyboardButton("💰 buy_usdt", callback_data="edit_param:buy_usdt")],
                 [InlineKeyboardButton("🔁 max_buys_per_day", callback_data="edit_param:max_buys_per_day")],
@@ -387,7 +586,7 @@ class Controller:
             return
 
         if action.startswith("edit_param:"):
-            param = action.split(":")[1]
+            param = action.split(":", 1)[1]
             pending = self._pending_configs.get(chat_id)
 
             if not pending:
@@ -406,11 +605,11 @@ class Controller:
                 await self._render(
                     query=query,
                     text=(
-                        "✏️ *Edit SYMBOL / BASE_ASSET*\n\n"
+                        "✏️ <b>Edit SYMBOL / BASE_ASSET</b>\n\n"
                         "Send both values in one message:\n"
-                        "`<SYMBOL> <BASE_ASSET>`\n\n"
+                        "<code>&lt;SYMBOL&gt; &lt;BASE_ASSET&gt;</code>\n\n"
                         "Example:\n"
-                        "`SOLUSDT SOL`"
+                        "<code>SOLUSDT SOL</code>"
                     ),
                     keyboard=[[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]],
                 )
@@ -420,84 +619,280 @@ class Controller:
             await self._render(
                 query=query,
                 text=(
-                    f"✏️ Editing parameter: *{param}*\n\n"
-                    f"Current value: `{current_value}`\n\n"
+                    f"✏️ Editing parameter: <b>{escape_html(param)}</b>\n\n"
+                    f"Current value: <code>{escape_html(str(current_value))}</code>\n\n"
                     "Send the new value:"
                 ),
                 keyboard=[[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]],
             )
             return
 
-        # =========================
-        # CONFIRM / CANCEL
-        # =========================
         if action == "confirm":
             pending = self._pending_configs.pop(chat_id, None)
             if not pending:
                 await query.answer("No pending configuration", show_alert=True)
                 return
 
-            self.bot_service.start_bot_from_config(pending["config"])
+            await self._send_temp_message(
+                context=context,
+                chat_id=chat_id,
+                text="⏳ <b>Please wait…</b>\nStarting bot.",
+                seconds=self._profile_ttl(pending.get("profile"), default=3),
+            )
+
+            try:
+                self.bot_service.start_bot_from_config(pending["config"])
+            except Exception as e:
+                await query.answer(f"❌ {str(e)}", show_alert=True)
+                return
 
             state = self.bot_service.get_bot_state(pending["symbol"])
             notifier = self.bot_service.get_notifier(pending["symbol"])
+            if state:
+                await notifier.render_bot_dashboard(state)
 
-            # Dashboard is a UI message -> can be edited
-            await notifier.render_bot_dashboard(state)
-            await query.answer()
+            text, keyboard = self._main_menu_payload()
+
+            menu_id = self._menu_message_id.get(chat_id)
+
+            if menu_id:
+                await self._safe_edit_menu(
+                    chat_id=chat_id,
+                    context=context,
+                    text=text,
+                    keyboard=keyboard,
+                )
+            else:
+                msg = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+                self._menu_message_id[chat_id] = msg.message_id
+
+            await self._send_deletable_message(
+                context=context,
+                chat_id=chat_id,
+                text=(
+                    "✅ <b>Bot started successfully</b>\n\n"
+                    f"<b>Symbol:</b> <code>{escape_html(pending['symbol'])}</code>"
+                ),
+                delete_after=self._profile_ttl(pending.get("profile"), default=10),
+            )
+
+            await query.answer("✅ Bot started!")
             return
 
         if action == "cancel":
             self._pending_configs.pop(chat_id, None)
-            await self._render(
-                query=query,
-                text="❌ Bot start cancelled.",
-                keyboard=[[InlineKeyboardButton("⬅️ Main menu", callback_data="main_menu")]],
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="❌ <b>Bot start cancelled.</b>",
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🗑️ Delete", callback_data="delete_self")]]
+                ),
             )
+            await query.answer("Cancelled")
             return
 
-        # =========================
-        # REPORT: PER BOT
-        # =========================
         if action.startswith("report_menu:"):
-            symbol = action.split(":")[1]
+            symbol = action.split(":", 1)[1]
             state = self.bot_service.get_bot_state(symbol)
             if not state:
                 await query.answer("No state found", show_alert=True)
                 return
-            
-            await query.answer("Generando reporte...")
+
+            await query.answer("Generating report...")
             file_path = write_bot_report(state)
             notifier = self.bot_service.get_any_notifier()
             await notifier.send_file(file_path, caption=f"📊 Report for {symbol}")
+
+            # After file -> send main menu as a new message to avoid edit conflicts
+            await self._send_main_menu(chat_id=chat_id, context=context)
+
             return
 
-        # =========================
-        # REPORT: GLOBAL
-        # =========================
         if action == "report_global":
             path = self.bot_service.generate_global_report_csv()
             if not path:
                 await query.answer("No bots running", show_alert=True)
                 return
-            await query.answer("Generando reporte...")
+
+            await query.answer("Generating report...")
             notifier = self.bot_service.get_any_notifier()
             await notifier.send_file(path, caption="📈 GLOBAL SERVER REPORT")
+            await self._send_main_menu(chat_id=chat_id, context=context)
+
             return
 
-        # =========================
-        # REPORT: GENERAL
-        # =========================
         if action == "report_general":
             path = Path("reports") / "general" / "general.csv"
             if not path.exists():
                 await query.answer("General report not found", show_alert=True)
                 return
-            await query.answer("Generando reporte...")
+
+            await query.answer("Generating report...")
             notifier = self.bot_service.get_any_notifier()
             await notifier.send_file(str(path), caption="🌍 General report (server-wide)")
+            await self._send_main_menu(chat_id=chat_id, context=context)
+
             return
-        # Unknown
+
+        if action.startswith("dash_refresh:"):
+            symbol = action.split(":", 1)[1]
+            state = self.bot_service.get_bot_state(symbol)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+
+            notifier = self.bot_service.get_notifier(symbol)
+            await notifier.render_bot_dashboard(state, force=True)
+            await query.answer("🔄 Refreshed")
+            return
+
+        if action.startswith("dash_open:"):
+            symbol = action.split(":", 1)[1]
+            state = self.bot_service.get_bot_state(symbol)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+
+            notifier = self.bot_service.get_notifier(symbol)
+            await notifier.render_bot_dashboard(state, force=True)
+            await query.answer("📊 Dashboard opened")
+            return
+
+        if action.startswith("vortex_live_prompt:"):
+            symbol = action.split(":", 1)[1]
+            state = self.bot_service.get_bot_state(symbol)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+            if state.profile != "vortex":
+                await query.answer("Only Vortex supports simulation mode", show_alert=True)
+                return
+            await self._send_vortex_confirmation(
+                context=context,
+                chat_id=chat_id,
+                state=state,
+            )
+            await query.answer("🧠 Vortex confirmation sent")
+            return
+
+        if action.startswith("vortex_live_yes:"):
+            symbol = action.split(":", 1)[1]
+            state = self.bot_service.get_bot_state(symbol)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+
+            state.trading_mode = TradingMode.LIVE
+            state.real_capital_enabled = True
+            state.live_disabled_notified = False
+            state.armed_notified = True
+            state.live_authorized = True
+            state.live_authorized_at = time.time()
+            state.awaiting_fresh_entry = True
+
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "💰 <b>REAL TRADING ENABLED</b>\n\n"
+                    f"Initial capital: {state.real_capital_limit:.2f} USDT\n"
+                    "Mode: LIVE (LIMITED)\n"
+                    "Waiting for fresh entry signal…\n\n"
+                    "Monitoring closely…"
+                ),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            await query.answer("💰 Live enabled")
+            return
+
+        if action.startswith("vortex_live_no:"):
+            symbol = action.split(":", 1)[1]
+            state = self.bot_service.get_bot_state(symbol)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+
+            state.trading_mode = TradingMode.SIMULATION
+            state.real_capital_enabled = False
+            state.armed_notified = False
+            state.live_disabled_notified = False
+            state.live_authorized = False
+            state.live_authorized_at = None
+            state.awaiting_fresh_entry = False
+
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "🧪 <b>Simulation continued.</b>\n\n"
+                    "Vortex will keep monitoring the market and notify again "
+                    "if conditions improve."
+                ),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            await query.answer("🧪 Simulation continued")
+            return
+
+        if action.startswith("dash_help:"):
+            help_text = (
+                "ℹ️ <b>BOT DASHBOARD — Help</b>\n\n"
+                "<b>MARKET</b>\n"
+                "• <b>Price now</b>: Último precio conocido del mercado.\n"
+                "• <b>SMA fast</b>: Media móvil rápida (reacciona más rápido).\n"
+                "• <b>SMA slow</b>: Media móvil lenta (define la tendencia).\n"
+                "• <b>Trend</b>: Dirección actual del mercado según SMAs.\n"
+                "• <b>SMA diff</b>: Diferencia porcentual entre SMA fast y SMA slow.\n\n"
+                "<b>ENTRY LOGIC</b>\n"
+                "• <b>Entry price</b>: Precio estimado donde el bot considera entrar.\n\n"
+                "<b>RISK</b>\n"
+                "• <b>Trailing stop</b>: Porcentaje de protección contra caídas.\n"
+                "• <b>Arm price</b>: Precio desde el cual el trailing stop se activa.\n"
+                "• <b>Stop price</b>: Precio actual de salida si el mercado cae.\n\n"
+                "<b>STATS</b>\n"
+                "• <b>Buys today</b>: Compras realizadas hoy.\n"
+                "• <b>Spent today</b>: Capital usado hoy.\n"
+                "• <b>Total PnL</b>: Ganancia o pérdida acumulada.\n\n"
+                "<b>Last action</b>\n"
+                "Estado actual interno del bot (esperando señal, armado, en trade, etc.).\n\n"
+                "📌 <i>Tip:</i> El dashboard se actualiza automáticamente solo cuando hay cambios "
+                "relevantes para evitar bloqueos de Telegram."
+            )
+
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=help_text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🗑️ Delete", callback_data="delete_self")]]
+                ),
+            )
+            await query.answer("ℹ️ Dashboard help")
+            return
+
+        if action == "delete_self":
+            try:
+                await query.message.delete()
+            except Exception:
+                return
+            return
+
         await query.answer("Unknown action", show_alert=True)
 
     # =========================
@@ -511,16 +906,28 @@ class Controller:
         if not pending:
             return
 
+        # Necesitamos un query real para re-render
+        query = self._last_query.get(chat_id)
+        if not query:
+            await update.message.reply_text("✋ Please use the buttons to continue.")
+            return
+
+        # =========================
+        # Editing SYMBOL / BASE_ASSET
+        # =========================
         if pending.get("edit_step") == "awaiting_symbol":
             parts = text.split()
             if len(parts) != 2:
                 await update.message.reply_text(
-                    "❌ Invalid format.\n\nUse:\n`<SYMBOL> <BASE_ASSET>`\nExample:\n`SOLUSDT SOL`",
-                    parse_mode=ParseMode.MARKDOWN_V2,
+                    "❌ Invalid format.\n\n"
+                    "Use:\n<code>&lt;SYMBOL&gt; &lt;BASE_ASSET&gt;</code>\n"
+                    "Example:\n<code>SOLUSDT SOL</code>",
+                    parse_mode=ParseMode.HTML,
                 )
                 return
 
             symbol, base_asset = parts
+
             config = (
                 BotBuilder()
                 .with_symbol(symbol, base_asset)
@@ -529,13 +936,22 @@ class Controller:
                 .build()
             )
 
-            pending.update({"symbol": symbol, "base_asset": base_asset, "config": config})
+            pending.update(
+                {
+                    "symbol": symbol.upper(),
+                    "base_asset": base_asset.upper(),
+                    "config": config,
+                }
+            )
             pending.pop("edit_step", None)
             pending.pop("edit_param", None)
 
-            await self._show_config(message=update.message, pending=pending)
+            await self._show_config(query=query, pending=pending)
             return
 
+        # =========================
+        # Editing numeric / float params
+        # =========================
         if pending.get("edit_step") == "awaiting_value":
             param = pending["edit_param"]
             try:
@@ -552,29 +968,69 @@ class Controller:
                 pending.pop("edit_step", None)
                 pending.pop("edit_param", None)
 
-                await self._show_config(message=update.message, pending=pending)
+                await self._show_config(query=query, pending=pending)
                 return
 
             except ValueError:
-                await update.message.reply_text(f"❌ Invalid value for {param}. Try again:")
+                await update.message.reply_text(
+                    f"❌ Invalid value for <b>{escape_html(param)}</b>. Try again:",
+                    parse_mode=ParseMode.HTML,
+                )
                 return
-    
-    async def _auto_refresh_dashboards(self, context: ContextTypes.DEFAULT_TYPE):
-        for state in self.bot_service.get_all_states():
-            notifier = self.bot_service.get_notifier(state.symbol)
 
-            # Solo si el bot sigue activo
+
+    async def _auto_refresh_dashboards(self, context):
+        for state in self.bot_service.get_all_states():
             if not state.running:
                 continue
 
+            # 🔒 NO refrescar si el bot aún no tiene dashboard
+            if state.telegram_message_id is None:
+                continue
+
+            notifier = self.bot_service.get_notifier(state.symbol)
             try:
                 await notifier.render_bot_dashboard(state)
-            except Exception:
-                logger.exception("Auto-refresh dashboard failed")
+            except Exception as e:
+                logger.warning("Dashboard refresh skipped: %s", e)
+                continue
+
+            if (
+                state.trading_mode == TradingMode.ARMED
+                and not state.armed_notified
+                and state.trades_count >= self._VORTEX_MIN_TRADES
+            ):
+                await self._send_vortex_confirmation(
+                    context=context,
+                    chat_id=self.bot_service.notifier.chat_id,
+                    state=state,
+                )
+                state.armed_notified = True
+
+            if (
+                state.trading_mode == TradingMode.LIVE
+                and state.real_capital_enabled
+                and state.real_drawdown_pct >= self._LIVE_DRAWDOWN_LIMIT
+                and not state.live_disabled_notified
+            ):
+                state.trading_mode = TradingMode.SIMULATION
+                state.real_capital_enabled = False
+                state.armed_notified = False
+                state.live_disabled_notified = True
+                await context.bot.send_message(
+                    chat_id=self.bot_service.notifier.chat_id,
+                    text=(
+                        "🛑 <b>REAL TRADING DISABLED</b>\n\n"
+                        f"Reason: drawdown exceeded {self._LIVE_DRAWDOWN_LIMIT * 100:.0f} %\n\n"
+                        "Vortex returned to SIMULATION mode."
+                    ),
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
 
 
     # =========================
-    # Commands
+    # Commands (kept for power users)
     # =========================
     async def confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
@@ -584,12 +1040,23 @@ class Controller:
             await update.message.reply_text("❌ No pending bot.")
             return
 
-        self.bot_service.start_bot_from_config(pending["config"])
+        try:
+            self.bot_service.start_bot_from_config(pending["config"])
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {escape_html(str(e))}")
+            return
+
         await update.message.reply_text("✅ Bot started successfully.")
 
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         self._pending_configs.pop(update.effective_chat.id, None)
-        await update.message.reply_text("❌ Bot start cancelled.")
+        await update.message.reply_text(
+            "❌ <b>Bot start cancelled.</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🗑️ Delete", callback_data="delete_self")]]
+            ),
+        )
 
     async def stop_bot(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args:
@@ -597,8 +1064,13 @@ class Controller:
             return
 
         symbol = context.args[0]
-        self.bot_service.stop_bot(symbol)
-        await update.message.reply_text(f"🛑 Bot stopped\nSymbol: {symbol}")
+        try:
+            self.bot_service.stop_bot(symbol)
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {escape_html(str(e))}")
+            return
+
+        await update.message.reply_text(f"🛑 Bot stopped\nSymbol: {escape_html(symbol)}")
 
     async def restart_bot(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(context.args) != 3:
@@ -606,24 +1078,29 @@ class Controller:
             return
 
         profile, symbol, base_asset = context.args
-        self.bot_service.restart_bot(symbol, base_asset, profile)
-        await update.message.reply_text(f"♻️ Bot restarted\nProfile: {profile}\nSymbol: {symbol}")
+        try:
+            self.bot_service.restart_bot(symbol, base_asset, profile)
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {escape_html(str(e))}")
+            return
+
+        await update.message.reply_text(
+            f"♻️ Bot restarted\nProfile: {escape_html(profile)}\nSymbol: {escape_html(symbol)}"
+        )
 
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        bots = self.bot_service.list_bots()
-        text = "🤷 No bots running" if not bots else "📊 Running bots:\n" + "\n".join(f"• {b}" for b in bots)
-
-        keyboard = [
-            [InlineKeyboardButton("➕ Start new bot", callback_data="start_new_bot")],
-            [InlineKeyboardButton("⬅️ Main menu", callback_data="main_menu")],
-        ]
-
-        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        text = self._build_running_bots_text()
+        keyboard = self._build_running_bots_keyboard()
+        await update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML,
+        )
 
     async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
-            "🤖 *HERMES — Trading Bot Assistant*\n\n"
-            "Use `/start` to open the menu.\n"
+            "🤖 <b>HERMES — Trading Bot Assistant</b>\n\n"
+            "Use /start to open the menu.\n"
             "Use buttons for guided setup.\n"
         )
         keyboard = [[InlineKeyboardButton("⬅️ Main menu", callback_data="main_menu")]]
@@ -631,6 +1108,5 @@ class Controller:
         await update.message.reply_text(
             text,
             reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN_V2,
+            parse_mode=ParseMode.HTML,
         )
-

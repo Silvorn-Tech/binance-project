@@ -10,6 +10,7 @@ from hermes.utils.bot import Bot
 from hermes.providers.binance import Binance
 from hermes.providers.Telegram import TelegramNotifier
 from hermes.utils.bot_config import BotConfig
+from hermes.utils.trading_mode import TradingMode
 
 
 class BotService:
@@ -45,8 +46,14 @@ class BotService:
         state = BotRuntimeState(
             symbol=config.symbol,
             profile=config.profile,
+            base_asset=config.base_asset,
             trailing_pct=config.trailing_pct,
+            config=config,
+            trading_mode=(
+                TradingMode.SIMULATION if config.profile == "vortex" else TradingMode.LIVE
+            ),
         )
+
 
         self._states[symbol] = state
 

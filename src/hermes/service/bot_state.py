@@ -1,30 +1,46 @@
-from dataclasses import dataclass
+# hermes/service/bot_state.py
+from dataclasses import dataclass, field
 from typing import Optional
 from datetime import datetime
 
+from hermes.utils.bot_config import BotConfig
+from hermes.utils.trading_mode import TradingMode
 
 @dataclass
 class BotRuntimeState:
+    # Identity
     symbol: str
     profile: str
+    config: Optional[BotConfig] = None
+    base_asset: Optional[str] = None
+    trading_mode: TradingMode = TradingMode.SIMULATION
+    live_authorized: bool = False
+    live_authorized_at: Optional[float] = None
+    awaiting_fresh_entry: bool = False
 
+    # Runtime flags
     running: bool = False
+    armed: bool = False
+    trailing_enabled: bool = False
+    waiting_for_confirmation: bool = False
+    waiting_for_signal: bool = False
+
+    # Strategy params (for UI/debug)
+    trailing_pct: float = 0.0
+    sma_fast: Optional[float] = None
+    sma_slow: Optional[float] = None
+
+    # Balances (for UI/debug)
+    usdt_balance: Optional[float] = None
+    base_balance: Optional[float] = None
 
     # Market / price
     last_price: Optional[float] = None
     arm_price: Optional[float] = None
     entry_price: Optional[float] = None
-
-    last_rendered_text: str | None = None
-
-    # Strategy config (READ-ONLY snapshot)
-    trailing_pct: float = 0.0
-
-    # Status flags
-    armed: bool = False
-    trailing_enabled: bool = False
-    waiting_for_confirmation: bool = False
-    waiting_for_signal: bool = False
+    stop_price: Optional[float] = None
+    vortex_score: Optional[float] = None
+    last_signal_ts: Optional[float] = None
 
     # Trading
     open_position_spent: float = 0.0
@@ -41,3 +57,29 @@ class BotRuntimeState:
 
     # Telegram
     telegram_message_id: Optional[int] = None
+    last_dashboard_hash: Optional[str] = None
+    last_dashboard_update: float = 0.0
+
+    # --- SIMULATION ---
+    virtual_capital: float = 1.0
+    virtual_qty: float = 0.0
+    virtual_entry_price: Optional[float] = None
+    virtual_max_price: Optional[float] = None
+    virtual_pnl: float = 0.0
+    virtual_peak_pnl: float = 0.0
+
+    # Simulation stats
+    trades_count: int = 0
+    wins: int = 0
+    losses: int = 0
+    total_win: float = 0.0
+    total_loss: float = 0.0
+    recent_pnls: list[float] = field(default_factory=list)
+    max_drawdown: float = 0.0
+    armed_notified: bool = False
+
+    # Live trading safety
+    real_capital_enabled: bool = False
+    real_capital_limit: float = 5.0
+    real_drawdown_pct: float = 0.0
+    live_disabled_notified: bool = False

@@ -86,9 +86,9 @@ def main() -> None:
     try:
         controller.start()
     except KeyboardInterrupt:
-        logger.warning("🛑 KeyboardInterrupt received, shutting down...")
+        logger.warning("CTRL+C received. Stopping all bots...")
         bot_service.stop_all()
-        logger.info("👋 Service stopped cleanly")
+
 
 
 if __name__ == "__main__":
