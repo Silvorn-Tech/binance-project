@@ -88,19 +88,35 @@ class Bot(Thread):
     # Thread lifecycle
     # =========================
     def run(self):
-        self._set_state(
-            running=True,
-            last_action="WAITING_CONFIRMATION",
-            waiting_for_confirmation=True,
-            waiting_for_signal=False,
-            armed=False,
-        )
-
-        logger.info(
-            "⏳ Bot waiting for arming confirmation | symbol=%s | profile=%s",
-            self.config.symbol,
-            self.config.profile,
-        )
+        if self.config.profile == "vortex":
+            self._set_state(
+                running=True,
+                last_action="WAIT_CONFIRMATION",
+                waiting_for_confirmation=True,
+                waiting_for_signal=False,
+                armed=False,
+            )
+            logger.info(
+                "⏳ Bot waiting for arming confirmation | symbol=%s | profile=%s",
+                self.config.symbol,
+                self.config.profile,
+            )
+        else:
+            self.armed = True
+            self._set_state(
+                running=True,
+                last_action="WAIT_SIGNAL",
+                waiting_for_confirmation=False,
+                waiting_for_signal=True,
+                armed=True,
+                live_authorized=True,
+                live_authorized_at=time.time(),
+            )
+            logger.info(
+                "✅ Bot armed automatically | symbol=%s | profile=%s",
+                self.config.symbol,
+                self.config.profile,
+            )
 
         while self._running:
             try:
@@ -194,42 +210,43 @@ class Bot(Thread):
             self._vortex_live_cycle(usdt)
             return
 
-        # =========================
-        # 2) ARMING
-        # =========================
-        price = float(self.market.get_price(self.config.symbol))
-        self._set_state(last_price=price)
+        if self.config.profile == "vortex":
+            # =========================
+            # 2) ARMING (VORTEX ONLY)
+            # =========================
+            price = float(self.market.get_price(self.config.symbol))
+            self._set_state(last_price=price)
 
-        if self.arm_price is None:
-            self.arm_price = price
-            self._set_state(
-                arm_price=price,
-                last_action="ARM_INIT",
-                waiting_for_confirmation=True,
-                waiting_for_signal=False,
-                armed=False,
-            )
-            time.sleep(10)
-            return
-
-        if not self.armed:
-            if price >= self.arm_price * (1 + self.ARM_PCT):
-                self.armed = True
+            if self.arm_price is None:
+                self.arm_price = price
                 self._set_state(
-                    armed=True,
-                    last_action="ARMED",
-                    waiting_for_confirmation=False,
-                    waiting_for_signal=False,
-                )
-            else:
-                self._set_state(
-                    last_action="WAIT_CONFIRMATION",
+                    arm_price=price,
+                    last_action="ARM_INIT",
                     waiting_for_confirmation=True,
                     waiting_for_signal=False,
                     armed=False,
                 )
                 time.sleep(10)
                 return
+
+            if not self.armed:
+                if price >= self.arm_price * (1 + self.ARM_PCT):
+                    self.armed = True
+                    self._set_state(
+                        armed=True,
+                        last_action="ARMED",
+                        waiting_for_confirmation=False,
+                        waiting_for_signal=False,
+                    )
+                else:
+                    self._set_state(
+                        last_action="WAIT_CONFIRMATION",
+                        waiting_for_confirmation=True,
+                        waiting_for_signal=False,
+                        armed=False,
+                    )
+                    time.sleep(10)
+                    return
 
         # =========================
         # 3) Risk checks
