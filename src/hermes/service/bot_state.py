@@ -24,6 +24,9 @@ class BotRuntimeState:
     trailing_enabled: bool = False
     waiting_for_confirmation: bool = False
     waiting_for_signal: bool = False
+    awaiting_user_confirmation: bool = False
+    user_confirmed_buy: bool = False
+    vortex_signal_ignored: bool = False
 
     # Strategy params (for UI/debug)
     trailing_pct: float = 0.0
@@ -39,6 +42,7 @@ class BotRuntimeState:
     arm_price: Optional[float] = None
     entry_price: Optional[float] = None
     stop_price: Optional[float] = None
+    trailing_max_price: Optional[float] = None
     vortex_score: Optional[float] = None
     last_signal_ts: Optional[float] = None
 

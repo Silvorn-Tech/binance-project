@@ -1,0 +1,12 @@
+{
+  "entry_price": 3120.8599999999997,
+  "entry_qty": 0.0022,
+  "entry_time": "2026-01-08T23:03:07.323894Z",
+  "in_position": true,
+  "last_update": "2026-01-08T23:06:17.355095Z",
+  "max_price": 3121.54,
+  "profile": "sentinel",
+  "spent_usdt": 6.865892,
+  "symbol": "ETHUSDT",
+  "trailing_pct": 0.01
+}

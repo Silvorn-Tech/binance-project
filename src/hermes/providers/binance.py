@@ -496,12 +496,15 @@ class Binance:
         trend_interval: str = Client.KLINE_INTERVAL_1MINUTE,
         trend_limit: int = 60,
         trend_sma_period: int = 25,
+        on_update: Optional[Callable[[dict[str, float]], None]] = None,
+        initial_max_price: Optional[float] = None,
     ) -> dict | None:
         symbol = symbol.upper()
         base_asset = self._get_base_asset(symbol)
 
         start_ts = time.time()
-        max_price = self.get_price(symbol)
+        current = self.get_price(symbol)
+        max_price = max(current, initial_max_price) if initial_max_price else current
         last_new_high_ts = start_ts
 
         logger.info(
@@ -594,6 +597,17 @@ class Binance:
 
             # 3) TRAILING STOP — price based
             stop_price = max_price * (1 - trailing_pct)
+            if on_update:
+                try:
+                    on_update(
+                        {
+                            "current": current,
+                            "max_price": max_price,
+                            "stop_price": stop_price,
+                        }
+                    )
+                except Exception as e:
+                    logger.warning(f"Trailing update hook failed: {e}")
             if current <= stop_price:
                 drop_pct = (max_price - current) / max_price
                 logger.warning(

@@ -17,7 +17,7 @@ from telegram.ext import (
     filters,
 )
 
-from telegram.error import BadRequest, RetryAfter
+from telegram.error import BadRequest, RetryAfter, TimedOut, NetworkError
 import asyncio
 
 from hermes.service.bot_builder import BotBuilder
@@ -428,6 +428,42 @@ class Controller:
 
         action = query.data
 
+        if action.startswith("vortex_signal_yes:") or action.startswith("vortex_signal_no:"):
+            symbol = action.split(":", 1)[1]
+            state = self.bot_service.get_bot_state(symbol)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+            if state.profile != "vortex":
+                await query.answer("Only Vortex supports confirmations", show_alert=True)
+                return
+            if not state.awaiting_user_confirmation:
+                await query.edit_message_text("⌛ Señal expirada", parse_mode=ParseMode.HTML)
+                return
+
+            if action.startswith("vortex_signal_yes:"):
+                state.user_confirmed_buy = True
+                state.waiting_for_confirmation = False
+                state.waiting_for_signal = False
+                state.vortex_signal_ignored = False
+                state.last_action = "USER_CONFIRMED_BUY"
+                await query.edit_message_text(
+                    "🟢 <b>VORTEX CONFIRMADO</b>\nEjecutando compra…",
+                    parse_mode=ParseMode.HTML,
+                )
+            else:
+                state.awaiting_user_confirmation = False
+                state.user_confirmed_buy = False
+                state.waiting_for_confirmation = False
+                state.waiting_for_signal = True
+                state.vortex_signal_ignored = True
+                state.last_action = "USER_REJECTED"
+                await query.edit_message_text(
+                    "❌ <b>VORTEX CANCELADO</b>",
+                    parse_mode=ParseMode.HTML,
+                )
+            return
+
         if action == "main_menu":
             text, keyboard = self._main_menu_payload()
             await self._render(query=query, text=text, keyboard=keyboard)
@@ -730,14 +766,19 @@ class Controller:
             return
 
         if action == "report_general":
-            path = Path("reports") / "general" / "general.csv"
-            if not path.exists():
-                await query.answer("General report not found", show_alert=True)
+            path = self.bot_service.generate_general_report_csv()
+            if not path:
+                await self._send_deletable_message(
+                    context=context,
+                    chat_id=chat_id,
+                    text="🤷 No bots running. General report not available.",
+                    delete_after=6,
+                )
                 return
 
             await query.answer("Generating report...")
             notifier = self.bot_service.get_any_notifier()
-            await notifier.send_file(str(path), caption="🌍 General report (server-wide)")
+            await notifier.send_file(path, caption="🌍 General report (server-wide)")
             await self._send_main_menu(chat_id=chat_id, context=context)
 
             return

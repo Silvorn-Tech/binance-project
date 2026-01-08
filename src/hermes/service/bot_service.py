@@ -76,6 +76,7 @@ class BotService:
             market_data=self.market_data,
             binance=live_binance,
             state=state,
+            notifier=self.notifier,
         )
 
         bot.start()
@@ -194,4 +195,42 @@ class BotService:
                 ])
 
         logger.info("📄 Global report generated | %s", file_path)
+        return str(file_path)
+
+    def generate_general_report_csv(self) -> str | None:
+        if not self._states:
+            return None
+
+        reports_dir = Path("reports") / "general"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+
+        file_path = reports_dir / "general.csv"
+
+        with open(file_path, "w", newline="") as f:
+            writer = csv.writer(f)
+
+            writer.writerow([
+                "symbol",
+                "profile",
+                "running",
+                "total_pnl_usdt",
+                "buys_today",
+                "spent_today",
+                "last_action",
+                "last_update",
+            ])
+
+            for state in self._states.values():
+                writer.writerow([
+                    state.symbol,
+                    state.profile,
+                    state.running,
+                    f"{state.total_pnl_usdt:.4f}",
+                    state.buys_today,
+                    f"{state.spent_today:.2f}",
+                    state.last_action,
+                    state.last_update,
+                ])
+
+        logger.info("📄 General report generated | %s", file_path)
         return str(file_path)

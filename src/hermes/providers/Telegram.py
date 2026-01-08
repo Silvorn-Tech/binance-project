@@ -1,5 +1,7 @@
+import asyncio
 import hashlib
 import os
+import threading
 import time
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -124,6 +126,10 @@ class TelegramNotifier:
         if state.last_price and state.stop_price:
             stop_distance = (state.last_price - state.stop_price) / state.last_price * 100
 
+        arm_price = state.arm_price
+        if state.trailing_enabled and state.trailing_max_price is not None:
+            arm_price = state.trailing_max_price
+
         lines = [
             "📊 <b>BOT DASHBOARD</b>",
             "",
@@ -147,7 +153,7 @@ class TelegramNotifier:
             "",
             "────────── <b>RISK</b> ────────────",
             f"<b>Trailing stop:</b> {pct(state.trailing_pct)} %",
-            f"<b>Arm price:</b> {fmt(state.arm_price)}",
+            f"<b>Arm price:</b> {fmt(arm_price)}",
             f"<b>Stop price:</b> {fmt(state.stop_price)}",
             f"<b>Distance to stop:</b> {fmt(stop_distance)} %",
             "",
@@ -223,3 +229,88 @@ class TelegramNotifier:
                 document=f,
                 caption=caption,
             )
+
+    # =========================
+    # Ephemeral notifications
+    # =========================
+    async def send_ephemeral(
+        self,
+        text: str,
+        delete_after: int = 5,
+        silent: bool = False,
+        reply_markup=None,
+    ):
+        if os.getenv("TELEGRAM_DEV_MODE") == "true":
+            return None
+
+        msg = await self.bot.send_message(
+            chat_id=self.chat_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            disable_notification=silent,
+            reply_markup=reply_markup,
+        )
+
+        if delete_after and delete_after > 0:
+            asyncio.create_task(self._auto_delete(msg.message_id, delete_after))
+
+        return msg
+
+    def send_ephemeral_sync(
+        self,
+        text: str,
+        delete_after: int = 5,
+        silent: bool = False,
+        reply_markup=None,
+    ) -> None:
+        if os.getenv("TELEGRAM_DEV_MODE") == "true":
+            return
+
+        async def _send_message():
+            return await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                disable_notification=silent,
+                reply_markup=reply_markup,
+            )
+
+        try:
+            msg = asyncio.run(_send_message())
+        except Exception as e:
+            logger.warning("Ephemeral send failed: %s", e)
+            return
+
+        if not delete_after or delete_after <= 0:
+            return
+
+        def _delete():
+            async def _delete_message():
+                try:
+                    await self.bot.delete_message(
+                        chat_id=self.chat_id,
+                        message_id=msg.message_id,
+                    )
+                except Exception:
+                    pass
+
+            try:
+                asyncio.run(_delete_message())
+            except Exception:
+                pass
+
+        timer = threading.Timer(delete_after, _delete)
+        timer.daemon = True
+        timer.start()
+
+    async def _auto_delete(self, message_id: int, delay: int):
+        await asyncio.sleep(delay)
+        try:
+            await self.bot.delete_message(
+                chat_id=self.chat_id,
+                message_id=message_id,
+            )
+        except Exception:
+            pass

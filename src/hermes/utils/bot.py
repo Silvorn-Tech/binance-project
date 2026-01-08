@@ -6,8 +6,11 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 
 from hermes.service.bot_state import BotRuntimeState
+from hermes.state.trade_state import load_state, save_state, clear_state
 from hermes.utils.bot_config import BotConfig
 from hermes.providers.binance import Binance
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from hermes.providers.Telegram import TelegramNotifier
 from hermes.providers.market_data import MarketData
 from hermes.utils.trading_mode import TradingMode
 
@@ -23,6 +26,7 @@ class Bot(Thread):
         market_data: MarketData,
         binance: Binance | None,
         state: BotRuntimeState,
+        notifier: TelegramNotifier | None = None,
     ):
         super().__init__(daemon=True)
 
@@ -30,6 +34,7 @@ class Bot(Thread):
         self.market = market_data
         self.binance = binance
         self.state = state
+        self.notifier = notifier
 
         self._running = True
 
@@ -57,6 +62,9 @@ class Bot(Thread):
             trailing_enabled=False,
             waiting_for_confirmation=False,
             waiting_for_signal=False,
+            awaiting_user_confirmation=False,
+            user_confirmed_buy=False,
+            vortex_signal_ignored=False,
             open_position_spent=0.0,
             buys_today=0,
             spent_today=0.0,
@@ -117,6 +125,37 @@ class Bot(Thread):
                 self.config.symbol,
                 self.config.profile,
             )
+
+        persisted = None
+        if self.state.trading_mode == TradingMode.LIVE and self.binance is not None:
+            persisted = load_state(self.config.symbol)
+        if persisted and persisted.get("in_position"):
+            trailing_pct = persisted.get("trailing_pct", self.config.trailing_pct)
+            entry_price = persisted.get("entry_price")
+            spent = persisted.get("spent_usdt", 0.0)
+            max_price = persisted.get("max_price", entry_price)
+
+            if entry_price and spent > 0:
+                self.open_position_spent = spent
+                self._set_state(
+                    last_action="REHYDRATED_TRAILING",
+                    entry_price=entry_price,
+                    open_position_spent=spent,
+                    trailing_enabled=True,
+                    waiting_for_signal=False,
+                    waiting_for_confirmation=False,
+                    trailing_pct=trailing_pct,
+                    trailing_max_price=max_price,
+                    stop_price=(
+                        max_price * (1 - trailing_pct) if max_price is not None else None
+                    ),
+                )
+                logger.warning(
+                    "🔁 Rehydrated open position | symbol=%s | entry=%.4f | max=%.4f",
+                    self.config.symbol,
+                    entry_price,
+                    max_price or entry_price,
+                )
 
         while self._running:
             try:
@@ -426,17 +465,78 @@ class Bot(Thread):
 
         price, score = self._compute_vortex_score(klines)
 
-        self._set_state(
-            last_action="CHECK_SIGNAL",
-            waiting_for_signal=True,
-            waiting_for_confirmation=False,
-        )
-
         if score <= VORTEX_ENTRY_THRESHOLD:
             self._set_state(
                 last_action="WAIT_SIGNAL",
                 waiting_for_signal=True,
+                waiting_for_confirmation=False,
+                awaiting_user_confirmation=False,
+                user_confirmed_buy=False,
+                vortex_signal_ignored=False,
             )
+            time.sleep(10)
+            return
+
+        if self.state.vortex_signal_ignored:
+            self._set_state(
+                last_action="WAIT_SIGNAL",
+                waiting_for_signal=True,
+                waiting_for_confirmation=False,
+            )
+            time.sleep(10)
+            return
+
+        if self.state.awaiting_user_confirmation:
+            if self.state.user_confirmed_buy:
+                self._set_state(
+                    last_action="USER_CONFIRMED_BUY",
+                    waiting_for_confirmation=False,
+                    waiting_for_signal=False,
+                    awaiting_user_confirmation=False,
+                    user_confirmed_buy=False,
+                )
+            else:
+                self._set_state(
+                    last_action="WAIT_CONFIRMATION",
+                    waiting_for_confirmation=True,
+                    waiting_for_signal=False,
+                )
+                time.sleep(10)
+                return
+        else:
+            self._set_state(
+                last_action="WAIT_CONFIRMATION",
+                waiting_for_confirmation=True,
+                waiting_for_signal=False,
+                awaiting_user_confirmation=True,
+                user_confirmed_buy=False,
+            )
+            if self.notifier is not None:
+                keyboard = InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "✅ YES",
+                                callback_data=f"vortex_signal_yes:{self.config.symbol}",
+                            ),
+                            InlineKeyboardButton(
+                                "❌ NO",
+                                callback_data=f"vortex_signal_no:{self.config.symbol}",
+                            ),
+                        ]
+                    ]
+                )
+                self.notifier.send_ephemeral_sync(
+                    text=(
+                        "🟣 <b>VORTEX SIGNAL</b>\n"
+                        f"{self.config.symbol}\n"
+                        f"Score: {score:.2f}\n\n"
+                        "¿Confirmar compra?"
+                    ),
+                    delete_after=30,
+                    silent=False,
+                    reply_markup=keyboard,
+                )
             time.sleep(10)
             return
 
@@ -577,9 +677,48 @@ class Bot(Thread):
             waiting_for_signal=False,
             waiting_for_confirmation=False,
         )
+        self._send_trade_alert(
+            text=f"🟢 <b>BUY</b> {self.config.symbol}",
+            delete_after=5,
+        )
+        save_state(
+            self.config.symbol,
+            {
+                "symbol": self.config.symbol,
+                "profile": self.config.profile,
+                "in_position": True,
+                "entry_price": price,
+                "entry_qty": qty,
+                "spent_usdt": spent,
+                "max_price": price,
+                "trailing_pct": self.config.trailing_pct,
+                "entry_time": datetime.utcnow().isoformat() + "Z",
+            },
+        )
 
     def _manage_open_position(self):
         self._require_live()
+        last_saved_max = {"value": self.state.trailing_max_price}
+
+        def _update_trailing_state(snapshot: dict[str, float]) -> None:
+            current = snapshot.get("current")
+            max_price = snapshot.get("max_price")
+            stop_price = snapshot.get("stop_price")
+            self._set_state(
+                last_price=current,
+                stop_price=stop_price,
+                trailing_max_price=max_price,
+                trailing_enabled=True,
+            )
+            if max_price is None:
+                return
+            if last_saved_max["value"] is None or max_price > last_saved_max["value"]:
+                persisted = load_state(self.config.symbol)
+                if persisted and persisted.get("in_position"):
+                    persisted["max_price"] = max_price
+                    save_state(self.config.symbol, persisted)
+                last_saved_max["value"] = max_price
+
         result = self.binance.trailing_stop_sell_all_pct(
             symbol=self.config.symbol,
             trailing_pct=self.config.trailing_pct,
@@ -587,6 +726,8 @@ class Bot(Thread):
             max_hold_seconds_without_new_high=self.config.max_hold_seconds_without_new_high,
             trend_exit_enabled=self.config.trend_exit_enabled,
             trend_sma_period=self.config.trend_sma_period,
+            on_update=_update_trailing_state,
+            initial_max_price=self.state.trailing_max_price,
         )
 
         if result:
@@ -606,6 +747,11 @@ class Bot(Thread):
             waiting_for_signal=False,
             waiting_for_confirmation=False,
         )
+        self._send_trade_alert(
+            text=f"🔴 <b>SELL</b> {self.config.symbol}\nP&L: {profit:+.2f} USDT",
+            delete_after=7,
+        )
+        clear_state(self.config.symbol)
 
         if self.state.trading_mode == TradingMode.LIVE and self.state.real_capital_enabled:
             if self.state.real_capital_limit > 0:
@@ -625,9 +771,27 @@ class Bot(Thread):
             armed=False,
             arm_price=None,
             entry_price=None,
+            stop_price=None,
+            trailing_max_price=None,
         )
 
         time.sleep(self.config.cooldown_after_sell_seconds)
+
+    def _send_trade_alert(self, text: str, delete_after: int) -> None:
+        if self.notifier is None:
+            return
+
+        def _send():
+            try:
+                self.notifier.send_ephemeral_sync(
+                    text=text,
+                    delete_after=delete_after,
+                    silent=False,
+                )
+            except Exception as e:
+                logger.warning("Trade alert failed: %s", e)
+
+        Thread(target=_send, daemon=True).start()
 
     # =========================
     # Strategy helpers
