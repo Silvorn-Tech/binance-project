@@ -1498,31 +1498,31 @@ class Controller:
             disable_web_page_preview=True,
         )
 
-            if (
-                state.trading_mode == TradingMode.ARMED
-                and not state.armed_notified
-                and state.trades_count >= self._VORTEX_MIN_TRADES
-            ):
-                await self._send_vortex_confirmation(
-                    context=context,
-                    chat_id=self.bot_service.notifier.chat_id,
-                    state=state,
-                )
-                state.armed_notified = True
+        if (
+            state.trading_mode == TradingMode.ARMED
+            and not state.armed_notified
+            and state.trades_count >= self._VORTEX_MIN_TRADES
+        ):
+            await self._send_vortex_confirmation(
+                context=context,
+                chat_id=self.bot_service.notifier.chat_id,
+                state=state,
+            )
+            state.armed_notified = True
 
-            if (
-                state.trading_mode == TradingMode.LIVE
-                and state.real_capital_enabled
-                and state.real_drawdown_pct >= self._LIVE_DRAWDOWN_LIMIT
-                and not state.live_disabled_notified
-            ):
-                state.trading_mode = TradingMode.SIMULATION
-                state.real_capital_enabled = False
-                state.armed_notified = False
-                state.live_disabled_notified = True
-                self.bot_service.disable_live(state.symbol)
-                await context.bot.send_message(
-                    chat_id=self.bot_service.notifier.chat_id,
+        if (
+            state.trading_mode == TradingMode.LIVE
+            and state.real_capital_enabled
+            and state.real_drawdown_pct >= self._LIVE_DRAWDOWN_LIMIT
+            and not state.live_disabled_notified
+        ):
+            state.trading_mode = TradingMode.SIMULATION
+            state.real_capital_enabled = False
+            state.armed_notified = False
+            state.live_disabled_notified = True
+            self.bot_service.disable_live(state.symbol)
+            await context.bot.send_message(
+                chat_id=self.bot_service.notifier.chat_id,
                     text=(
                         "🛑 <b>REAL TRADING DISABLED</b>\n\n"
                         f"Reason: drawdown exceeded {self._LIVE_DRAWDOWN_LIMIT * 100:.0f} %\n\n"
