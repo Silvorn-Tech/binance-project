@@ -66,6 +66,7 @@ class Bot(Thread):
             awaiting_user_confirmation=False,
             user_confirmed_buy=False,
             vortex_signal_ignored=False,
+            capital_skip_notified=False,
             open_position_spent=0.0,
             buys_today=0,
             spent_today=0.0,
@@ -325,6 +326,7 @@ class Bot(Thread):
             return
 
         if trade_usdt <= 0 or usdt < trade_usdt:
+            self._notify_capital_skip(trade_usdt, usdt)
             self._set_state(
                 last_action="RISK_NO_USDT",
                 waiting_for_signal=False,
@@ -332,6 +334,9 @@ class Bot(Thread):
             )
             time.sleep(10)
             return
+        else:
+            if self.state.capital_skip_notified:
+                self._set_state(capital_skip_notified=False)
 
         # =========================
         # 4) Entry signal
@@ -586,6 +591,7 @@ class Bot(Thread):
             return
 
         if trade_usdt <= 0 or usdt < trade_usdt:
+            self._notify_capital_skip(trade_usdt, usdt)
             self._set_state(
                 last_action="RISK_NO_USDT",
                 waiting_for_signal=False,
@@ -593,6 +599,9 @@ class Bot(Thread):
             )
             time.sleep(10)
             return
+        else:
+            if self.state.capital_skip_notified:
+                self._set_state(capital_skip_notified=False)
 
         self._set_state(
             entry_price=price,
@@ -699,6 +708,34 @@ class Bot(Thread):
                 "trailing_pct": self.config.trailing_pct,
                 "entry_time": datetime.utcnow().isoformat() + "Z",
             },
+        )
+
+    def _notify_capital_skip(self, trade_usdt: float, wallet_usdt: float) -> None:
+        if self.state.capital_skip_notified:
+            return
+
+        capital_allowed = wallet_usdt * self.config.capital_pct
+        capital_used = self.spent_today
+        capital_remaining = max(capital_allowed - capital_used, 0.0)
+        min_trade = self.config.min_trade_usdt
+
+        reason = "Capital exhausted"
+        details = f"Remaining: {capital_remaining:.2f} USDT < min_trade_usdt ({min_trade:.2f})"
+        if trade_usdt <= 0:
+            details = f"Capital allowed: {capital_allowed:.2f} USDT < min_trade_usdt ({min_trade:.2f})"
+
+        self._set_state(capital_skip_notified=True)
+
+        if self.notifier is None:
+            return
+
+        self._send_trade_alert(
+            text=(
+                "❌ <b>BUY SKIPPED</b>\n"
+                f"Reason: {reason}\n"
+                f"{details}"
+            ),
+            delete_after=12,
         )
 
     def _compute_trade_usdt(self, total_usdt: float) -> float:

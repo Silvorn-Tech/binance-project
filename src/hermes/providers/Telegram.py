@@ -139,6 +139,11 @@ class TelegramNotifier:
 
         cfg = state.config
 
+        wallet_usdt = state.usdt_balance or 0.0
+        capital_allowed = wallet_usdt * cfg.capital_pct
+        capital_used = state.spent_today or 0.0
+        capital_remaining = max(capital_allowed - capital_used, 0.0)
+
         lines = [
             "📊 <b>BOT DASHBOARD</b>",
             "",
@@ -165,6 +170,12 @@ class TelegramNotifier:
             f"<b>Arm price:</b> {fmt(arm_price)}",
             f"<b>Stop price:</b> {fmt(state.stop_price)}",
             f"<b>Distance to stop:</b> {fmt(stop_distance)} %",
+            "",
+            "────────── <b>CAPITAL</b> ────────────",
+            f"<b>Wallet USDT:</b> {fmt(wallet_usdt)}",
+            f"<b>Capital allowed:</b> {fmt(capital_allowed)} USDT ({pct(cfg.capital_pct)}%)",
+            f"<b>Capital used:</b> {fmt(capital_used)} USDT",
+            f"<b>Capital remaining:</b> {fmt(capital_remaining)} USDT",
             "",
             "────────── <b>LIMITS</b> ────────────",
             f"<b>Max trades/day:</b> {limit_value(getattr(cfg, 'max_buys_per_day', None), getattr(cfg, 'disable_max_buys_per_day', False))}",

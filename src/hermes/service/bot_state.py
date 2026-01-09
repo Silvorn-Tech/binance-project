@@ -28,6 +28,7 @@ class BotRuntimeState:
     awaiting_user_confirmation: bool = False
     user_confirmed_buy: bool = False
     vortex_signal_ignored: bool = False
+    capital_skip_notified: bool = False
 
     # Strategy params (for UI/debug)
     trailing_pct: float = 0.0
