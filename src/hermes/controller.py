@@ -491,6 +491,7 @@ class Controller:
         keyboard = [
             [InlineKeyboardButton("📈 Global performance (CSV)", callback_data="report_global")],
             [InlineKeyboardButton("🌍 General report (CSV)", callback_data="report_general")],
+            [InlineKeyboardButton("🧾 Trade Report (CSV)", callback_data="report_trades")],
             [InlineKeyboardButton("⬅️ Main menu", callback_data="main_menu")],
         ]
         await self._render(query=query, text=text, keyboard=keyboard)
@@ -1205,6 +1206,24 @@ class Controller:
             await query.answer("Generating report...")
             notifier = self.bot_service.get_any_notifier()
             await notifier.send_file(path, caption="🌍 General report (server-wide)")
+            await self._send_main_menu(chat_id=chat_id, context=context)
+
+            return
+
+        if action == "report_trades":
+            path = self.bot_service.get_trade_report_csv()
+            if not path:
+                await self._send_deletable_message(
+                    context=context,
+                    chat_id=chat_id,
+                    text="🤷 No trades recorded yet.",
+                    delete_after=6,
+                )
+                return
+
+            await query.answer("Generating report...")
+            notifier = self.bot_service.get_any_notifier()
+            await notifier.send_file(path, caption="🧾 Trade Report (all trades)")
             await self._send_main_menu(chat_id=chat_id, context=context)
 
             return

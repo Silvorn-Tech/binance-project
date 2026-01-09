@@ -265,3 +265,9 @@ class BotService:
 
         logger.info("📄 General report generated | %s", file_path)
         return str(file_path)
+
+    def get_trade_report_csv(self) -> str | None:
+        file_path = self.reporter.file_path
+        if not file_path.exists():
+            return None
+        return str(file_path)
