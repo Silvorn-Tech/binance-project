@@ -11,6 +11,7 @@ from hermes.utils.bot_config import BotConfig
 from hermes.providers.binance import Binance
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from hermes.providers.Telegram import TelegramNotifier
+from hermes.reporting.trade_reporter import TradeReporter
 from hermes.providers.market_data import MarketData
 from hermes.utils.trading_mode import TradingMode
 
@@ -27,6 +28,7 @@ class Bot(Thread):
         binance: Binance | None,
         state: BotRuntimeState,
         notifier: TelegramNotifier | None = None,
+        reporter: TradeReporter | None = None,
     ):
         super().__init__(daemon=True)
 
@@ -35,6 +37,7 @@ class Bot(Thread):
         self.binance = binance
         self.state = state
         self.notifier = notifier
+        self.reporter = reporter
 
         self._running = True
 
@@ -691,10 +694,18 @@ class Bot(Thread):
             waiting_for_signal=False,
             waiting_for_confirmation=False,
         )
-        self._send_trade_alert(
-            text=f"🟢 <b>BUY</b> {self.config.symbol}",
-            delete_after=5,
-        )
+        if self.reporter is not None:
+            self.reporter.record_trade(
+                bot_id=self.config.bot_id,
+                profile=self.config.profile,
+                symbol=self.config.symbol,
+                side="BUY",
+                price=price,
+                qty=qty,
+                usdt_spent=spent,
+                usdt_received=0.0,
+                trade_pnl=0.0,
+            )
         save_state(
             self.config.symbol,
             {
@@ -805,10 +816,20 @@ class Bot(Thread):
             waiting_for_signal=False,
             waiting_for_confirmation=False,
         )
-        self._send_trade_alert(
-            text=f"🔴 <b>SELL</b> {self.config.symbol}\nP&L: {profit:+.2f} USDT",
-            delete_after=7,
-        )
+        if self.reporter is not None:
+            exec_qty = float(order.get("executedQty", 0.0))
+            avg_price = received / exec_qty if exec_qty else 0.0
+            self.reporter.record_trade(
+                bot_id=self.config.bot_id,
+                profile=self.config.profile,
+                symbol=self.config.symbol,
+                side="SELL",
+                price=avg_price,
+                qty=exec_qty,
+                usdt_spent=self.open_position_spent,
+                usdt_received=received,
+                trade_pnl=profit,
+            )
         clear_state(self.config.symbol)
 
         if self.state.trading_mode == TradingMode.LIVE and self.state.real_capital_enabled:

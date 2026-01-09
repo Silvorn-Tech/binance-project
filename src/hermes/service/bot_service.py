@@ -6,6 +6,7 @@ import csv
 
 from hermes.service.bot_builder import BotBuilder
 from hermes.config.bot_config_store import save_config
+from hermes.reporting.trade_reporter import TradeReporter
 from hermes.service.bot_state import BotRuntimeState
 from hermes.utils.bot import Bot
 from hermes.providers.binance import Binance
@@ -27,6 +28,7 @@ class BotService:
         self.binance = binance
         self.market_data = market_data
         self.notifier = notifier
+        self.reporter = TradeReporter()
 
         logger.info("🧠 BotService initialized")
 
@@ -81,6 +83,7 @@ class BotService:
             binance=live_binance,
             state=state,
             notifier=self.notifier,
+            reporter=self.reporter,
         )
 
         bot.start()

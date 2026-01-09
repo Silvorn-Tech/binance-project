@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import time as dt_time
 from pathlib import Path
 import html
 import time
+from zoneinfo import ZoneInfo
 
 from loguru import logger
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -117,6 +119,14 @@ class Controller:
                 self._auto_refresh_dashboards,
                 interval=15,
                 first=10,
+            )
+            app.job_queue.run_daily(
+                self._send_daily_summary,
+                time=dt_time(hour=18, minute=0, tzinfo=ZoneInfo("America/Bogota")),
+            )
+            app.job_queue.run_daily(
+                self._send_daily_summary,
+                time=dt_time(hour=6, minute=0, tzinfo=ZoneInfo("America/Bogota")),
             )
 
         else:
@@ -1461,6 +1471,32 @@ class Controller:
             except Exception as e:
                 logger.warning("Dashboard refresh skipped: %s", e)
                 continue
+
+    async def _send_daily_summary(self, context):
+        states = self.bot_service.get_all_states()
+        if not states:
+            return
+
+        lines = [
+            "📊 <b>Daily Summary</b>",
+            "",
+        ]
+        for state in states:
+            lines.append(
+                f"• <b>{state.symbol}</b> ({state.profile}) | "
+                f"Trades: {state.trades_count} | "
+                f"PnL: {state.total_pnl_usdt:+.2f} USDT | "
+                f"Buys today: {state.buys_today} | "
+                f"Spent: {state.spent_today:.2f} USDT"
+            )
+
+        text = "\n".join(lines)
+        await context.bot.send_message(
+            chat_id=self.bot_service.get_any_notifier().chat_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
 
             if (
                 state.trading_mode == TradingMode.ARMED
