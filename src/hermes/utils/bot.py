@@ -14,6 +14,7 @@ from hermes.providers.Telegram import TelegramNotifier
 from hermes.reporting.trade_reporter import TradeReporter
 from hermes.providers.market_data import MarketData
 from hermes.utils.trading_mode import TradingMode
+from hermes.utils.adaptive_controller import AdaptiveController
 
 BOGOTA_TZ = ZoneInfo("America/Bogota")
 HEARTBEAT_EVERY_SECONDS = 5.0
@@ -29,6 +30,7 @@ class Bot(Thread):
         state: BotRuntimeState,
         notifier: TelegramNotifier | None = None,
         reporter: TradeReporter | None = None,
+        adaptive_controller: AdaptiveController | None = None,
     ):
         super().__init__(daemon=True)
 
@@ -38,6 +40,7 @@ class Bot(Thread):
         self.state = state
         self.notifier = notifier
         self.reporter = reporter
+        self.adaptive_controller = adaptive_controller
 
         self._running = True
 
@@ -53,6 +56,10 @@ class Bot(Thread):
         self.ARM_PCT = 0.002  # 0.2%
 
         self._last_heartbeat = time.monotonic()
+
+        self._base_trailing_pct = config.trailing_pct
+        self._base_max_buys_per_day = config.max_buys_per_day
+        self._base_cooldown_after_sell_seconds = config.cooldown_after_sell_seconds
 
         # Initial snapshot
         self._set_state(
@@ -78,6 +85,10 @@ class Bot(Thread):
             last_price=None,
             entry_price=None,
             arm_price=None,
+            adaptive_state="NORMAL",
+            adaptive_reason=None,
+            adaptive_max_buys_per_day=None,
+            adaptive_cooldown_after_sell_seconds=None,
         )
 
         logger.info(
@@ -96,6 +107,41 @@ class Bot(Thread):
 
         if hasattr(self.state, "last_update"):
             self.state.last_update = self._now()
+
+    def _effective_max_buys_per_day(self) -> int:
+        if self.state.adaptive_max_buys_per_day is not None:
+            return self.state.adaptive_max_buys_per_day
+        return self.config.max_buys_per_day
+
+    def _effective_cooldown_after_sell_seconds(self) -> float:
+        if self.state.adaptive_cooldown_after_sell_seconds is not None:
+            return self.state.adaptive_cooldown_after_sell_seconds
+        return self.config.cooldown_after_sell_seconds
+
+    def _effective_trailing_pct(self) -> float:
+        return self.state.trailing_pct or self.config.trailing_pct
+
+    def apply_adaptive_state(self, adaptive_state: str, reason: str | None = None) -> None:
+        if adaptive_state == "DEFENSIVE":
+            trailing_pct = max(self._base_trailing_pct * 0.8, 0.001)
+            max_buys = max(int(self._base_max_buys_per_day * 0.5), 1)
+            cooldown = max(self._base_cooldown_after_sell_seconds * 1.5, 1.0)
+            self._set_state(
+                adaptive_state="DEFENSIVE",
+                adaptive_reason=reason,
+                adaptive_max_buys_per_day=max_buys,
+                adaptive_cooldown_after_sell_seconds=cooldown,
+                trailing_pct=trailing_pct,
+            )
+            return
+
+        self._set_state(
+            adaptive_state="NORMAL",
+            adaptive_reason=reason,
+            adaptive_max_buys_per_day=None,
+            adaptive_cooldown_after_sell_seconds=None,
+            trailing_pct=self._base_trailing_pct,
+        )
 
     # =========================
     # Thread lifecycle
@@ -297,7 +343,7 @@ class Bot(Thread):
         # =========================
         # 3) Risk checks
         # =========================
-        if (not self.config.disable_max_buys_per_day) and self.buys_today >= self.config.max_buys_per_day:
+        if (not self.config.disable_max_buys_per_day) and self.buys_today >= self._effective_max_buys_per_day():
             self._set_state(
                 last_action="RISK_MAX_BUYS",
                 waiting_for_signal=False,
@@ -563,7 +609,7 @@ class Bot(Thread):
 
         trade_usdt = self._compute_trade_usdt(usdt)
 
-        if (not self.config.disable_max_buys_per_day) and self.buys_today >= self.config.max_buys_per_day:
+        if (not self.config.disable_max_buys_per_day) and self.buys_today >= self._effective_max_buys_per_day():
             self._set_state(
                 last_action="RISK_MAX_BUYS",
                 waiting_for_signal=False,
@@ -716,7 +762,7 @@ class Bot(Thread):
                 "entry_qty": qty,
                 "spent_usdt": spent,
                 "max_price": price,
-                "trailing_pct": self.config.trailing_pct,
+                "trailing_pct": self._effective_trailing_pct(),
                 "entry_time": datetime.utcnow().isoformat() + "Z",
             },
         )
@@ -789,7 +835,7 @@ class Bot(Thread):
 
         result = self.binance.trailing_stop_sell_all_pct(
             symbol=self.config.symbol,
-            trailing_pct=self.config.trailing_pct,
+            trailing_pct=self._effective_trailing_pct(),
             poll_seconds=3.0,
             max_hold_seconds_without_new_high=self.config.max_hold_seconds_without_new_high,
             new_high_epsilon_pct=self.config.new_high_epsilon_pct,
@@ -830,6 +876,11 @@ class Bot(Thread):
                 usdt_received=received,
                 trade_pnl=profit,
             )
+        if self.adaptive_controller is not None:
+            try:
+                self.adaptive_controller.evaluate(self)
+            except Exception as e:
+                logger.warning("Adaptive evaluation failed: %s", e)
         clear_state(self.config.symbol)
 
         if self.state.trading_mode == TradingMode.LIVE and self.state.real_capital_enabled:
@@ -854,7 +905,7 @@ class Bot(Thread):
             trailing_max_price=None,
         )
 
-        time.sleep(self.config.cooldown_after_sell_seconds)
+        time.sleep(self._effective_cooldown_after_sell_seconds())
 
     def _send_trade_alert(self, text: str, delete_after: int) -> None:
         if self.notifier is None:

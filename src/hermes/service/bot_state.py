@@ -61,6 +61,12 @@ class BotRuntimeState:
     last_action: str = "INIT"
     last_update: Optional[datetime] = None
 
+    # Adaptive control
+    adaptive_state: str = "NORMAL"
+    adaptive_reason: Optional[str] = None
+    adaptive_max_buys_per_day: Optional[int] = None
+    adaptive_cooldown_after_sell_seconds: Optional[float] = None
+
     # Telegram
     telegram_message_id: Optional[int] = None
     last_dashboard_hash: Optional[str] = None

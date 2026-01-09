@@ -1,7 +1,7 @@
 import csv
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from collections import deque
 
 
 class TradeReporter:
@@ -62,3 +62,25 @@ class TradeReporter:
             if not file_exists:
                 writer.writeheader()
             writer.writerow(row)
+
+    def get_recent_trades(
+        self,
+        *,
+        bot_id: str,
+        limit: int = 10,
+        side: str | None = None,
+    ) -> list[dict]:
+        if not self.file_path.exists():
+            return []
+
+        rows: deque[dict] = deque(maxlen=max(limit, 1))
+        with self.file_path.open("r", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get("bot_id") != bot_id:
+                    continue
+                if side and row.get("side") != side:
+                    continue
+                rows.append(row)
+
+        return list(rows)

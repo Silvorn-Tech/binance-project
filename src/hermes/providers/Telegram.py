@@ -149,11 +149,16 @@ class TelegramNotifier:
         capital_used = state.spent_today or 0.0
         capital_remaining = max(capital_allowed - capital_used, 0.0)
 
+        adaptive_label = state.adaptive_state
+        if state.adaptive_reason:
+            adaptive_label = f"{adaptive_label} ({state.adaptive_reason})"
+
         lines = [
             "📊 <b>BOT DASHBOARD</b>",
             "",
             f"<b>Symbol:</b> <code>{state.symbol}</code>",
             f"<b>Profile:</b> <code>{state.profile}</code>",
+            f"<b>Adaptive state:</b> {adaptive_label}",
             f"<b>Status:</b> {'🟢 RUNNING' if state.running else '🔴 STOPPED'}",
             "",
             f"<b>Mode:</b> {mode_label}",
