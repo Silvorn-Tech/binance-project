@@ -66,6 +66,9 @@ EDIT_HELP_TEXT = (
     "• Sentinel → 1.0%\n"
     "• Equilibrium → 1.5%\n"
     "• Vortex → 3.0%\n\n"
+    "📈 <b>new_high_epsilon_pct</b>\n"
+    "Minimum price increase required to count as a new high.\n"
+    "Helps reduce noise in trailing updates.\n\n"
     "🚫 <b>Disable limits</b>\n"
     "Disables:\n"
     "• max_buys_per_day\n"
@@ -447,6 +450,7 @@ class Controller:
             f"• sma_fast: {config.sma_fast}\n"
             f"• sma_slow: {config.sma_slow}\n"
             f"• trailing_pct: {config.trailing_pct}\n\n"
+            f"• new_high_epsilon_pct: {config.new_high_epsilon_pct}\n\n"
             "What do you want to do?"
         )
 
@@ -772,6 +776,7 @@ class Controller:
             )
             keyboard = [
                 [InlineKeyboardButton("🛑 Yes, stop", callback_data=f"stop_execute:{symbol}")],
+                [InlineKeyboardButton("🔥 Stop & Sell", callback_data=f"stop_sell_execute:{symbol}")],
                 [InlineKeyboardButton("❌ Cancel", callback_data="main_menu")],
             ]
             await self._render(query=query, text=text, keyboard=keyboard)
@@ -872,6 +877,7 @@ class Controller:
                 [InlineKeyboardButton("🔁 max_buys_per_day", callback_data="edit_param:max_buys_per_day")],
                 [InlineKeyboardButton("📊 daily_budget_usdt", callback_data="edit_param:daily_budget_usdt")],
                 [InlineKeyboardButton("📉 trailing_pct", callback_data="edit_param:trailing_pct")],
+                [InlineKeyboardButton("📈 new_high_epsilon_pct", callback_data="edit_param:new_high_epsilon_pct")],
                 [InlineKeyboardButton("🚫 Disable limits", callback_data="disable_limits_menu")],
                 [InlineKeyboardButton("🔄 symbol / base_asset", callback_data="edit_param:symbol")],
                 [InlineKeyboardButton("⬅️ Back", callback_data="edit_back_config")],
@@ -1067,6 +1073,68 @@ class Controller:
             )
 
             await query.answer("✅ Bot started!")
+            return
+
+        if action.startswith("stop_sell_execute:"):
+            symbol = action.split(":", 1)[1]
+            state = self.bot_service.get_bot_state(symbol)
+            wait_seconds = self._profile_ttl(state.profile if state else None, default=3)
+
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+
+            await self._send_temp_message(
+                context=context,
+                chat_id=chat_id,
+                text="⏳ <b>Please wait…</b>\nStopping and selling.",
+                seconds=wait_seconds,
+            )
+
+            order = None
+            if state and state.trading_mode == TradingMode.LIVE:
+                try:
+                    order = self.bot_service.binance.safe_sell_all(symbol)
+                except Exception as e:
+                    logger.warning("Stop & Sell failed: %s", e)
+
+            try:
+                self.bot_service.stop_bot(symbol)
+            except Exception as e:
+                await query.answer(f"❌ {str(e)}", show_alert=True)
+                return
+
+            if order and state:
+                received = float(order.get("cummulativeQuoteQty", 0.0))
+                spent = state.open_position_spent or 0.0
+                pnl = received - spent if spent > 0 else 0.0
+                text = (
+                    "🔥 <b>POSITION CLOSED</b>\n"
+                    "Reason: Manual stop\n"
+                    f"Received: {received:.2f} USDT\n"
+                    f"PnL: {pnl:+.2f} USDT"
+                )
+            else:
+                text = (
+                    "🛑 <b>Bot stopped</b>\n"
+                    "No position to sell."
+                )
+
+            await self._send_deletable_message(
+                context=context,
+                chat_id=chat_id,
+                text=text,
+                delete_after=self._profile_ttl(state.profile if state else None, default=10),
+            )
+
+            text, keyboard = self._main_menu_payload()
+            await self._safe_edit_menu(
+                chat_id=chat_id,
+                context=context,
+                text=text,
+                keyboard=keyboard,
+            )
             return
 
         if action == "cancel":

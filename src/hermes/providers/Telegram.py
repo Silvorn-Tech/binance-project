@@ -134,8 +134,13 @@ class TelegramNotifier:
             stop_distance = (state.last_price - state.stop_price) / state.last_price * 100
 
         arm_price = state.arm_price
-        if state.trailing_enabled and state.trailing_max_price is not None:
-            arm_price = state.trailing_max_price
+        max_price = state.trailing_max_price
+        if state.trailing_enabled and max_price is not None:
+            arm_price = max_price
+
+        distance_to_high = None
+        if state.last_price and max_price:
+            distance_to_high = (state.last_price - max_price) / max_price * 100
 
         cfg = state.config
 
@@ -168,6 +173,8 @@ class TelegramNotifier:
             "────────── <b>RISK</b> ────────────",
             f"<b>Trailing stop:</b> {pct(state.trailing_pct)} %",
             f"<b>Arm price:</b> {fmt(arm_price)}",
+            f"<b>Max price:</b> {fmt(max_price)}",
+            f"<b>Distance to high:</b> {fmt(distance_to_high)} %",
             f"<b>Stop price:</b> {fmt(state.stop_price)}",
             f"<b>Distance to stop:</b> {fmt(stop_distance)} %",
             "",

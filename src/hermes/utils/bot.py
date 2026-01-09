@@ -781,6 +781,7 @@ class Bot(Thread):
             trailing_pct=self.config.trailing_pct,
             poll_seconds=3.0,
             max_hold_seconds_without_new_high=self.config.max_hold_seconds_without_new_high,
+            new_high_epsilon_pct=self.config.new_high_epsilon_pct,
             trend_exit_enabled=self.config.trend_exit_enabled,
             trend_sma_period=self.config.trend_sma_period,
             on_update=_update_trailing_state,

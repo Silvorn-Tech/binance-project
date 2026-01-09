@@ -28,6 +28,7 @@ class BotBuilder:
         self._config.setdefault("trend_exit_enabled", True)
         self._config.setdefault("trend_sma_period", 25)
         self._config.setdefault("max_hold_seconds_without_new_high", 5 * 60)
+        self._config.setdefault("new_high_epsilon_pct", 0.0002)
         self._config.setdefault("disable_max_buys_per_day", False)
         self._config.setdefault("disable_daily_budget", False)
         return self
@@ -52,6 +53,7 @@ class BotBuilder:
             "sma_fast",
             "sma_slow",
             "trailing_pct",
+            "new_high_epsilon_pct",
             "kline_interval",
             "kline_limit",
             "cooldown_after_sell_seconds",

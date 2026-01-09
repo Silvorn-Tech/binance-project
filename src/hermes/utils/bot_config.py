@@ -27,6 +27,7 @@ class BotConfig:
 
     # Exit management
     trailing_pct: float
+    new_high_epsilon_pct: float
     cooldown_after_sell_seconds: float
 
     # Trend exit (optional but default ON)

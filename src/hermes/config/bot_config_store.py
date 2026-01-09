@@ -33,5 +33,6 @@ def load_config(bot_id: str) -> Optional[BotConfig]:
 
     data.setdefault("disable_max_buys_per_day", False)
     data.setdefault("disable_daily_budget", False)
+    data.setdefault("new_high_epsilon_pct", 0.0002)
 
     return BotConfig(**data)

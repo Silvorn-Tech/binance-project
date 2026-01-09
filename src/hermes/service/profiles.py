@@ -15,6 +15,7 @@ PROFILES = {
         "sma_fast": 14,
         "sma_slow": 50,
         "trailing_pct": 0.01,
+        "new_high_epsilon_pct": 0.001,
     },
 
     # =========================
@@ -31,6 +32,7 @@ PROFILES = {
         "sma_fast": 9,
         "sma_slow": 21,
         "trailing_pct": 0.015,
+        "new_high_epsilon_pct": 0.0007,
     },
 
     # =========================
@@ -47,5 +49,6 @@ PROFILES = {
         "sma_fast": 5,
         "sma_slow": 13,
         "trailing_pct": 0.03,
+        "new_high_epsilon_pct": 0.0002,
     },
 }
