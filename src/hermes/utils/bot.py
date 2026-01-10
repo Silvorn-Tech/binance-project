@@ -17,7 +17,7 @@ from hermes.reporting.trade_reporter import TradeReporter
 from hermes.reporting.post_mortem_audit import PostMortemAuditor
 from hermes.providers.market_data import MarketData
 from hermes.utils.trading_mode import TradingMode
-from hermes.utils.adaptive_controller import AdaptiveController
+from hermes.utils.adaptive_controller import AdaptiveController, AdaptiveMetrics
 from hermes.persistence.db import SessionLocal
 from hermes.persistence.models import Asset, DecisionType, StrategyProfile
 from hermes.repository.trade_repository import TradeRepository
