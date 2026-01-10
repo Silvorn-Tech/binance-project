@@ -158,6 +158,9 @@ class TelegramNotifier:
         capital_allowed = wallet_usdt * cfg.capital_pct
         capital_used = state.spent_today or 0.0
         capital_remaining = max(capital_allowed - capital_used, 0.0)
+        virtual_wallet = None
+        if state.trading_mode == TradingMode.AI:
+            virtual_wallet = state.virtual_capital
 
         adaptive_state_label = state.adaptive_state
         adaptive_reason_label = state.adaptive_reason or "—"
@@ -195,6 +198,7 @@ class TelegramNotifier:
             "",
             "────────── <b>CAPITAL</b> ────────────",
             f"<b>Wallet USDT:</b> {fmt(wallet_usdt)}",
+            f"<b>Virtual wallet:</b> {fmt(virtual_wallet)}" if virtual_wallet is not None else None,
             f"<b>Capital allowed:</b> {fmt(capital_allowed)} USDT ({pct(cfg.capital_pct)}%)",
             f"<b>Capital used:</b> {fmt(capital_used)} USDT",
             f"<b>Capital remaining:</b> {fmt(capital_remaining)} USDT",
@@ -234,6 +238,7 @@ class TelegramNotifier:
             lines.extend(
                 [
                     "────────── <b>SIMULATION (AI)</b> ───────────",
+                    f"<b>Score (60m):</b> {pct(state.ai_score_60m)} %",
                     f"<b>Trades (60m):</b> {state.ai_trades_60m or 0}",
                     f"<b>Win rate (60m):</b> {pct(state.ai_win_rate_60m)} %",
                     f"<b>Avg PnL (60m):</b> {fmt(state.ai_avg_pnl_60m, 4)} USDT",
@@ -242,6 +247,7 @@ class TelegramNotifier:
                 ]
             )
 
+        lines = [line for line in lines if line is not None]
         lines.extend(
             [
                 "───────── <b>STATS</b> ────────────",

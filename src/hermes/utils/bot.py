@@ -127,6 +127,7 @@ class Bot(Thread):
             ai_pnl_slope_60m=None,
             ai_max_drawdown_60m=None,
             ai_trades_60m=None,
+            ai_score_60m=None,
             ai_last_decision=None,
             ai_last_reason=None,
             ai_blocked_by_ai=None,
@@ -634,11 +635,13 @@ class Bot(Thread):
             metrics = self.adaptive_controller.compute_metrics(trades)
 
         if metrics is not None:
+            ai_score = self._compute_ai_score(metrics)
             self._set_state(
                 ai_trades_60m=metrics.total_trades,
                 ai_win_rate_60m=metrics.win_rate,
                 ai_avg_pnl_60m=metrics.avg_abs_pnl,
                 ai_max_drawdown_60m=metrics.drawdown_pct,
+                ai_score_60m=ai_score,
             )
 
         trend_strength = "unknown"
@@ -661,6 +664,15 @@ class Bot(Thread):
             "timeframe": self.config.kline_interval,
             "trade_history": trade_history,
         }
+
+    def _compute_ai_score(self, metrics: AdaptiveMetrics) -> float:
+        win_rate = max(min(metrics.win_rate, 1.0), 0.0)
+        drawdown = max(min(metrics.drawdown_pct, 1.0), 0.0)
+        flip_rate = metrics.flip_rate if metrics.flip_rate is not None else 0.0
+        flip_rate = max(min(flip_rate, 1.0), 0.0)
+
+        score = (0.5 * win_rate) + (0.3 * (1 - drawdown)) + (0.2 * (1 - flip_rate))
+        return max(min(score, 1.0), 0.0)
 
     def _generate_ai_recommendation(self) -> None:
         snapshot = self._build_ai_snapshot()

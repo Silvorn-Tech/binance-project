@@ -81,6 +81,7 @@ class BotRuntimeState:
     ai_pnl_slope_60m: Optional[float] = None
     ai_max_drawdown_60m: Optional[float] = None
     ai_trades_60m: Optional[int] = None
+    ai_score_60m: Optional[float] = None
     ai_last_decision: Optional[str] = None
     ai_last_reason: Optional[str] = None
     ai_blocked_by_ai: Optional[bool] = None
