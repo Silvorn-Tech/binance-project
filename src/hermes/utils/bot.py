@@ -559,8 +559,40 @@ class Bot(Thread):
         self._buy(trade_usdt)
 
     def _ai_cycle(self) -> None:
+        self._update_market_snapshot()
         self._maybe_generate_ai_recommendation()
         time.sleep(5)
+
+    def _update_market_snapshot(self) -> None:
+        try:
+            klines = self.market.get_klines(
+                self.config.symbol,
+                self.config.kline_interval,
+                self.config.kline_limit,
+            )
+        except Exception as e:
+            logger.warning("Market snapshot failed: %s", e)
+            return
+
+        if not klines:
+            return
+
+        closes = [float(k[4]) for k in klines]
+        current = closes[-1]
+        self._set_state(last_price=current)
+
+        if len(closes) < self.config.sma_slow:
+            return
+
+        fast = sum(closes[-self.config.sma_fast:]) / self.config.sma_fast
+        slow = sum(closes[-self.config.sma_slow:]) / self.config.sma_slow
+        entry_price = current if fast > slow else None
+
+        self._set_state(
+            sma_fast=fast,
+            sma_slow=slow,
+            entry_price=entry_price,
+        )
 
     def _ai_snapshot_ready(self) -> bool:
         started_at = self.state.ai_snapshot_started_at

@@ -230,6 +230,17 @@ class TelegramNotifier:
                     "",
                 ]
             )
+        elif state.trading_mode == TradingMode.AI:
+            lines.extend(
+                [
+                    "────────── <b>SIMULATION (AI)</b> ───────────",
+                    f"<b>Trades (60m):</b> {state.ai_trades_60m or 0}",
+                    f"<b>Win rate (60m):</b> {pct(state.ai_win_rate_60m)} %",
+                    f"<b>Avg PnL (60m):</b> {fmt(state.ai_avg_pnl_60m, 4)} USDT",
+                    f"<b>Max drawdown (60m):</b> {pct(state.ai_max_drawdown_60m)} %",
+                    "",
+                ]
+            )
 
         lines.extend(
             [
