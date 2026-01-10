@@ -148,10 +148,16 @@ class Controller:
 
     async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         err = context.error
+        if err is None:
+            logger.warning(
+                "Telegram error handler invoked without exception | update=%s",
+                update,
+            )
+            return
         if isinstance(err, (TimedOut, NetworkError)):
             logger.warning("Telegram network error: %s", err)
             return
-        logger.exception("Unhandled Telegram error", exc_info=err)
+        logger.opt(exception=err).error("Unhandled Telegram error")
 
     # =========================
     # Render helper (HTML)

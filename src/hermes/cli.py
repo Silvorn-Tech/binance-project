@@ -1,5 +1,7 @@
 # src/cli.py
 import os
+import threading
+import time
 from pathlib import Path
 from dotenv import load_dotenv
 from loguru import logger
@@ -11,6 +13,8 @@ from hermes.providers.Telegram import TelegramNotifier
 from hermes.utils.logging_config import setup_logging
 from hermes.service.bot_service import BotService
 from hermes.controller import Controller
+from hermes.persistence.db import init_db
+from hermes.service.performance_job import run_performance_window_job
 
 
 def main() -> None:
@@ -31,6 +35,24 @@ def main() -> None:
     setup_logging()
 
     logger.info("🚀 Starting Binance Bot Microservice")
+
+    # =========================
+    # DATABASE
+    # =========================
+    init_db()
+
+    # =========================
+    # PERFORMANCE JOB
+    # =========================
+    def _performance_loop():
+        while True:
+            try:
+                run_performance_window_job(window_minutes=60)
+            except Exception as e:
+                logger.warning("Performance job loop failed: %s", e)
+            time.sleep(60 * 60)
+
+    threading.Thread(target=_performance_loop, daemon=True).start()
 
     # =========================
     # ENV VALIDATION

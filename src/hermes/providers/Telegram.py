@@ -107,6 +107,11 @@ class TelegramNotifier:
                 return "—"
             return f"{value}{suffix}"
 
+        def yesno(value):
+            if value is None:
+                return "—"
+            return "YES" if value else "NO"
+
         if state.trading_mode == TradingMode.LIVE and state.awaiting_fresh_entry:
             mode_label = "💰 LIVE (WAITING ENTRY)"
         else:
@@ -192,6 +197,17 @@ class TelegramNotifier:
             "────────── <b>LIMITS</b> ────────────",
             f"<b>Max trades/day:</b> {limit_value(getattr(cfg, 'max_buys_per_day', None), getattr(cfg, 'disable_max_buys_per_day', False))}",
             f"<b>Daily budget:</b> {limit_value(getattr(cfg, 'daily_budget_usdt', None), getattr(cfg, 'disable_daily_budget', False), ' USDT')}",
+            "",
+            "──────── <b>AI / ANALYSIS</b> ────────",
+            f"<b>AI mode:</b> {state.ai_mode or '—'}",
+            f"<b>Market regime:</b> {state.ai_market_regime or '—'}",
+            f"<b>Regime confidence:</b> {fmt(state.ai_regime_confidence)}",
+            f"<b>Win rate (60m):</b> {pct(state.ai_win_rate_60m)} %",
+            f"<b>Avg PnL (60m):</b> {fmt(state.ai_avg_pnl_60m, 4)} USDT",
+            f"<b>PnL slope (60m):</b> {fmt(state.ai_pnl_slope_60m, 4)} USDT",
+            f"<b>Max drawdown (60m):</b> {pct(state.ai_max_drawdown_60m)} %",
+            f"<b>Last AI decision:</b> {state.ai_last_decision or '—'}",
+            f"<b>Blocked by AI:</b> {yesno(state.ai_blocked_by_ai)}",
             "",
         ]
 

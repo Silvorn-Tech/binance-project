@@ -8,3 +8,5 @@ Requires-Dist: python-dotenv>=1.0.1
 Requires-Dist: loguru>=0.7.2
 Requires-Dist: python-telegram-bot>=20.7
 Requires-Dist: python-telegram-bot[job-queue]>=20.7
+Requires-Dist: sqlalchemy>=2.0
+Requires-Dist: pymysql>=1.1.0

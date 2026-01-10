@@ -13,7 +13,9 @@ dependencies = [
   "python-dotenv>=1.0.1",
   "loguru>=0.7.2",
   "python-telegram-bot>=20.7",
-  "python-telegram-bot[job-queue]>=20.7"
+  "python-telegram-bot[job-queue]>=20.7",
+  "sqlalchemy>=2.0",
+  "pymysql>=1.1.0"
 ]
 
 # =========================
@@ -31,4 +33,3 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["hermes", "hermes.*"]
-

@@ -1,9 +1,11 @@
 # src/utils/bot.py
 import time
+from enum import Enum
 from threading import Thread
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from loguru import logger
+from sqlalchemy import select
 
 from hermes.service.bot_state import BotRuntimeState
 from hermes.state.trade_state import load_state, save_state, clear_state
@@ -15,10 +17,23 @@ from hermes.reporting.trade_reporter import TradeReporter
 from hermes.providers.market_data import MarketData
 from hermes.utils.trading_mode import TradingMode
 from hermes.utils.adaptive_controller import AdaptiveController
+from hermes.persistence.db import SessionLocal
+from hermes.persistence.models import Asset, DecisionType, StrategyProfile
+from hermes.repository.trade_repository import TradeRepository
+from hermes.repository.decision_repository import DecisionRepository
+from hermes.repository.performance_repository import PerformanceRepository
+from hermes.ai.regime_classifier import RegimeClassifier
+from hermes.ai.types import MarketRegime
 
 BOGOTA_TZ = ZoneInfo("America/Bogota")
 HEARTBEAT_EVERY_SECONDS = 5.0
 VORTEX_ENTRY_THRESHOLD = 0.5
+class AIMode(Enum):
+    SHADOW = "SHADOW"
+    ACTIVE = "ACTIVE"
+
+
+AI_MODE = AIMode.SHADOW
 
 
 class Bot(Thread):
@@ -56,6 +71,8 @@ class Bot(Thread):
         self.ARM_PCT = 0.002  # 0.2%
 
         self._last_heartbeat = time.monotonic()
+        self._last_decision_log_at = 0.0
+        self._cycle_regime = None
 
         self._base_trailing_pct = config.trailing_pct
         self._base_max_buys_per_day = config.max_buys_per_day
@@ -89,6 +106,17 @@ class Bot(Thread):
             adaptive_reason=None,
             adaptive_max_buys_per_day=None,
             adaptive_cooldown_after_sell_seconds=None,
+            ai_mode=AI_MODE.value,
+            ai_market_regime=None,
+            ai_regime_confidence=None,
+            ai_win_rate_60m=None,
+            ai_avg_pnl_60m=None,
+            ai_pnl_slope_60m=None,
+            ai_max_drawdown_60m=None,
+            ai_trades_60m=None,
+            ai_last_decision=None,
+            ai_last_reason=None,
+            ai_blocked_by_ai=None,
         )
 
         logger.info(
@@ -244,6 +272,7 @@ class Bot(Thread):
     # Core trading loop
     # =========================
     def _trade_cycle(self):
+        self._cycle_regime = None
         if self.state.trading_mode != TradingMode.LIVE and self.binance is not None:
             logger.warning("⚠️ Binance injected outside LIVE mode")
         # Daily reset
@@ -862,9 +891,9 @@ class Bot(Thread):
             waiting_for_signal=False,
             waiting_for_confirmation=False,
         )
+        exec_qty = float(order.get("executedQty", 0.0))
+        avg_price = received / exec_qty if exec_qty else 0.0
         if self.reporter is not None:
-            exec_qty = float(order.get("executedQty", 0.0))
-            avg_price = received / exec_qty if exec_qty else 0.0
             self.reporter.record_trade(
                 bot_id=self.config.bot_id,
                 profile=self.config.profile,
@@ -876,6 +905,11 @@ class Bot(Thread):
                 usdt_received=received,
                 trade_pnl=profit,
             )
+        self._persist_real_trade(
+            exit_price=avg_price,
+            pnl=profit,
+            exit_reason="TRAILING_STOP",
+        )
         if self.adaptive_controller is not None:
             try:
                 self.adaptive_controller.evaluate(self)
@@ -906,6 +940,82 @@ class Bot(Thread):
         )
 
         time.sleep(self._effective_cooldown_after_sell_seconds())
+
+    def _persist_real_trade(
+        self,
+        *,
+        exit_price: float,
+        pnl: float,
+        exit_reason: str,
+    ) -> None:
+        if self.state.trading_mode != TradingMode.LIVE:
+            return
+
+        persisted = load_state(self.config.symbol)
+        entry_time = None
+        entry_price = self.state.entry_price or 0.0
+        if persisted:
+            entry_price = persisted.get("entry_price", entry_price)
+            raw_entry_time = persisted.get("entry_time")
+            if isinstance(raw_entry_time, str):
+                try:
+                    entry_time = datetime.fromisoformat(raw_entry_time.replace("Z", "+00:00"))
+                except ValueError:
+                    entry_time = None
+
+        if entry_time is None:
+            entry_time = datetime.now(timezone.utc)
+        elif entry_time.tzinfo is None:
+            entry_time = entry_time.replace(tzinfo=timezone.utc)
+
+        exit_time = datetime.now(timezone.utc)
+        duration_seconds = int((exit_time - entry_time).total_seconds())
+
+        symbol = self.config.symbol
+        base_asset = self.config.base_asset or symbol.replace("USDT", "")
+        quote_asset = "USDT" if symbol.endswith("USDT") else symbol.replace(base_asset, "")
+
+        try:
+            with SessionLocal() as session:
+                profile = session.execute(
+                    select(StrategyProfile).where(StrategyProfile.name == self.config.profile)
+                ).scalars().first()
+                if profile is None:
+                    profile = StrategyProfile(
+                        name=self.config.profile,
+                        risk_level=self.config.profile,
+                        description="Auto-created profile",
+                    )
+                    session.add(profile)
+                    session.flush()
+
+                asset = session.execute(
+                    select(Asset).where(Asset.symbol == symbol)
+                ).scalars().first()
+                if asset is None:
+                    asset = Asset(
+                        symbol=symbol,
+                        base_asset=base_asset,
+                        quote_asset=quote_asset,
+                    )
+                    session.add(asset)
+                    session.flush()
+
+                repo = TradeRepository(session)
+                repo.save_real_trade(
+                    profile_id=profile.profile_id,
+                    asset_id=asset.asset_id,
+                    entry_time=entry_time,
+                    exit_time=exit_time,
+                    entry_price=float(entry_price or 0.0),
+                    exit_price=float(exit_price or 0.0),
+                    pnl=float(pnl),
+                    fees=0.0,
+                    duration_seconds=duration_seconds,
+                    exit_reason=exit_reason,
+                )
+        except Exception as e:
+            logger.warning("DB trade persist failed: %s", e)
 
     def _send_trade_alert(self, text: str, delete_after: int) -> None:
         if self.notifier is None:
@@ -947,7 +1057,135 @@ class Bot(Thread):
             entry_price=current if fast > slow else None,
         )
 
-        return fast > slow
+        signal = fast > slow
+        if signal:
+            if not self._shadow_regime_check():
+                return False
+        else:
+            self._log_no_trade_decision(reason="no_signal", min_interval_seconds=300.0)
+
+        return signal
+
+    def _shadow_regime_check(self) -> bool:
+        try:
+            with SessionLocal() as session:
+                profile_id, asset_id = self._ensure_profile_asset(session)
+
+                regime = self._get_cycle_regime(session, profile_id, asset_id)
+
+                decision_repo = DecisionRepository(session)
+                if AI_MODE == AIMode.ACTIVE and regime == MarketRegime.NO_EDGE:
+                    decision_repo.save_decision(
+                        asset_id=asset_id,
+                        profile_id=profile_id,
+                        decision_type=DecisionType.NO_TRADE,
+                        regime_detected=regime.value,
+                        confidence_score=0.0,
+                        reason="blocked_by_regime_classifier",
+                    )
+                    self._set_state(
+                        ai_last_decision=DecisionType.NO_TRADE.value,
+                        ai_last_reason="blocked_by_regime_classifier",
+                        ai_blocked_by_ai=True,
+                    )
+                    return False
+
+                decision_repo.save_decision(
+                    asset_id=asset_id,
+                    profile_id=profile_id,
+                    decision_type=DecisionType.ENTER,
+                    regime_detected=regime.value,
+                    confidence_score=0.0,
+                    reason="shadow_mode: regime_classifier",
+                )
+                self._set_state(
+                    ai_last_decision=DecisionType.ENTER.value,
+                    ai_last_reason="shadow_mode: regime_classifier",
+                    ai_blocked_by_ai=False,
+                )
+                return True
+        except Exception as e:
+            logger.warning("Decision log failed: %s", e)
+            return True
+
+    def _log_no_trade_decision(self, *, reason: str, min_interval_seconds: float) -> None:
+        now = time.monotonic()
+        if now - self._last_decision_log_at < min_interval_seconds:
+            return
+        self._last_decision_log_at = now
+
+        try:
+            with SessionLocal() as session:
+                profile_id, asset_id = self._ensure_profile_asset(session)
+                regime = self._get_cycle_regime(session, profile_id, asset_id)
+                decision_repo = DecisionRepository(session)
+                decision_repo.save_decision(
+                    asset_id=asset_id,
+                    profile_id=profile_id,
+                    decision_type=DecisionType.NO_TRADE,
+                    regime_detected=regime.value,
+                    confidence_score=0.0,
+                    reason=reason,
+                )
+                self._set_state(
+                    ai_last_decision=DecisionType.NO_TRADE.value,
+                    ai_last_reason=reason,
+                    ai_blocked_by_ai=False,
+                )
+        except Exception as e:
+            logger.warning("Decision log failed: %s", e)
+
+    def _get_cycle_regime(self, session, profile_id: int, asset_id: int) -> MarketRegime:
+        if self._cycle_regime is not None:
+            return self._cycle_regime
+
+        perf_repo = PerformanceRepository(session)
+        window = perf_repo.get_latest_window(profile_id, asset_id)
+        classifier = RegimeClassifier(perf_repo)
+        regime = classifier.classify_window(window)
+        self._cycle_regime = regime
+        self._set_state(
+            ai_mode=AI_MODE.value,
+            ai_market_regime=regime.value,
+            ai_regime_confidence=None,
+            ai_win_rate_60m=window.win_rate if window else None,
+            ai_avg_pnl_60m=window.avg_pnl if window else None,
+            ai_pnl_slope_60m=window.pnl_slope if window else None,
+            ai_max_drawdown_60m=window.max_drawdown if window else None,
+            ai_trades_60m=window.trades_count if window else None,
+        )
+        return regime
+
+    def _ensure_profile_asset(self, session) -> tuple[int, int]:
+        symbol = self.config.symbol
+        base_asset = self.config.base_asset or symbol.replace("USDT", "")
+        quote_asset = "USDT" if symbol.endswith("USDT") else symbol.replace(base_asset, "")
+
+        profile = session.execute(
+            select(StrategyProfile).where(StrategyProfile.name == self.config.profile)
+        ).scalars().first()
+        if profile is None:
+            profile = StrategyProfile(
+                name=self.config.profile,
+                risk_level=self.config.profile,
+                description="Auto-created profile",
+            )
+            session.add(profile)
+            session.flush()
+
+        asset = session.execute(
+            select(Asset).where(Asset.symbol == symbol)
+        ).scalars().first()
+        if asset is None:
+            asset = Asset(
+                symbol=symbol,
+                base_asset=base_asset,
+                quote_asset=quote_asset,
+            )
+            session.add(asset)
+            session.flush()
+
+        return profile.profile_id, asset.asset_id
 
     # =========================
     # Time helpers

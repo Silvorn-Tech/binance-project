@@ -67,6 +67,19 @@ class BotRuntimeState:
     adaptive_max_buys_per_day: Optional[int] = None
     adaptive_cooldown_after_sell_seconds: Optional[float] = None
 
+    # AI / Analysis
+    ai_mode: str = "SHADOW"
+    ai_market_regime: Optional[str] = None
+    ai_regime_confidence: Optional[float] = None
+    ai_win_rate_60m: Optional[float] = None
+    ai_avg_pnl_60m: Optional[float] = None
+    ai_pnl_slope_60m: Optional[float] = None
+    ai_max_drawdown_60m: Optional[float] = None
+    ai_trades_60m: Optional[int] = None
+    ai_last_decision: Optional[str] = None
+    ai_last_reason: Optional[str] = None
+    ai_blocked_by_ai: Optional[bool] = None
+
     # Telegram
     telegram_message_id: Optional[int] = None
     last_dashboard_hash: Optional[str] = None

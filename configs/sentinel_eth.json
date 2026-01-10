@@ -11,6 +11,7 @@
   "max_buys_per_day": 5,
   "max_hold_seconds_without_new_high": 300,
   "min_trade_usdt": 7.0,
+  "new_high_epsilon_pct": 0.001,
   "profile": "sentinel",
   "sma_fast": 14,
   "sma_slow": 50,
