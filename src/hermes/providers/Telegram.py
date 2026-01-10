@@ -112,7 +112,9 @@ class TelegramNotifier:
                 return "—"
             return "YES" if value else "NO"
 
-        if state.trading_mode == TradingMode.LIVE and state.awaiting_fresh_entry:
+        if state.read_only:
+            mode_label = "🟦 READ-ONLY"
+        elif state.trading_mode == TradingMode.LIVE and state.awaiting_fresh_entry:
             mode_label = "💰 LIVE (WAITING ENTRY)"
         else:
             mode_label = {
@@ -154,16 +156,16 @@ class TelegramNotifier:
         capital_used = state.spent_today or 0.0
         capital_remaining = max(capital_allowed - capital_used, 0.0)
 
-        adaptive_label = state.adaptive_state
-        if state.adaptive_reason:
-            adaptive_label = f"{adaptive_label} ({state.adaptive_reason})"
+        adaptive_state_label = state.adaptive_state
+        adaptive_reason_label = state.adaptive_reason or "—"
 
         lines = [
             "📊 <b>BOT DASHBOARD</b>",
             "",
             f"<b>Symbol:</b> <code>{state.symbol}</code>",
             f"<b>Profile:</b> <code>{state.profile}</code>",
-            f"<b>Adaptive state:</b> {adaptive_label}",
+            f"<b>Adaptive:</b> {adaptive_state_label}",
+            f"<b>Reason:</b> {adaptive_reason_label}",
             f"<b>Status:</b> {'🟢 RUNNING' if state.running else '🔴 STOPPED'}",
             "",
             f"<b>Mode:</b> {mode_label}",
@@ -249,6 +251,22 @@ class TelegramNotifier:
                 InlineKeyboardButton(
                     "🔄 Refresh",
                     callback_data=f"dash_refresh:{state.symbol}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "📊 Adaptive Review",
+                    callback_data=f"dash_adaptive_review:{state.symbol}",
+                ),
+                InlineKeyboardButton(
+                    "🧾 Post-Mortem",
+                    callback_data=f"dash_post_mortem:{state.symbol}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "📦 Last trades",
+                    callback_data=f"dash_last_trades:{state.symbol}",
                 ),
             ],
             [

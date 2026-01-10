@@ -8,6 +8,8 @@ class TradeReporter:
     def __init__(self, file_path: str | Path = "reports/trades/trades.csv") -> None:
         self.file_path = Path(file_path)
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
+        self.adaptive_file_path = Path("reports/adaptive/adaptive_events.csv")
+        self.adaptive_file_path.parent.mkdir(parents=True, exist_ok=True)
         self._cumulative_pnl = self._load_last_cumulative()
 
     def _load_last_cumulative(self) -> float:
@@ -80,6 +82,79 @@ class TradeReporter:
                 if row.get("bot_id") != bot_id:
                     continue
                 if side and row.get("side") != side:
+                    continue
+                rows.append(row)
+
+        return list(rows)
+
+    def get_last_trades(
+        self,
+        *,
+        bot_id: str,
+        limit: int = 5,
+    ) -> list[dict]:
+        return self.get_recent_trades(
+            bot_id=bot_id,
+            limit=limit,
+            side=None,
+        )
+
+    def record_adaptive_event(
+        self,
+        *,
+        bot_id: str,
+        profile: str,
+        symbol: str,
+        previous_state: str | None,
+        adaptive_state: str,
+        reason: str | None,
+        metrics: dict[str, float | int | None] | None = None,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        metrics_fields = [
+            "win_rate",
+            "cumulative_pnl",
+            "drawdown_pct",
+            "negative_streak",
+            "avg_abs_pnl_pct",
+            "pnl_volatility_pct",
+            "flip_rate",
+        ]
+        row = {
+            "timestamp": now.isoformat(),
+            "bot_id": bot_id,
+            "profile": profile,
+            "symbol": symbol,
+            "previous_state": previous_state or "",
+            "adaptive_state": adaptive_state,
+            "reason": reason or "",
+        }
+        metrics = metrics or {}
+        for key in metrics_fields:
+            value = metrics.get(key)
+            row[key] = "" if value is None else str(value)
+
+        file_exists = self.adaptive_file_path.exists()
+        with self.adaptive_file_path.open("a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+
+    def get_recent_adaptive_events(
+        self,
+        *,
+        bot_id: str,
+        limit: int = 10,
+    ) -> list[dict]:
+        if not self.adaptive_file_path.exists():
+            return []
+
+        rows: deque[dict] = deque(maxlen=max(limit, 1))
+        with self.adaptive_file_path.open("r", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get("bot_id") != bot_id:
                     continue
                 rows.append(row)
 

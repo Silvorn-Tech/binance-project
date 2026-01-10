@@ -137,6 +137,9 @@ class Controller:
         app.add_handler(CommandHandler("restart", self.restart_bot))
         app.add_handler(CommandHandler("status", self.status))
         app.add_handler(CommandHandler("help", self.help))
+        app.add_handler(CommandHandler("adaptive_review", self.adaptive_review))
+        app.add_handler(CommandHandler("post_mortem", self.post_mortem))
+        app.add_handler(CommandHandler("last_trades", self.last_trades))
         app.add_handler(CommandHandler("confirm", self.confirm))
         app.add_handler(CommandHandler("cancel", self.cancel))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
@@ -573,6 +576,8 @@ class Controller:
                 "/start → Open main menu\n"
                 "/status → See running bots\n"
                 "/stop &lt;SYMBOL&gt; → Stop a bot\n"
+                "/adaptive_review [BOT_ID|SYMBOL]\n"
+                "/post_mortem [BOT_ID|SYMBOL]\n"
             )
             keyboard = [[InlineKeyboardButton("⬅️ Main menu", callback_data="main_menu")]]
             await self._render(query=query, text=text, keyboard=keyboard)
@@ -1246,6 +1251,59 @@ class Controller:
             await query.answer("🔄 Refreshed")
             return
 
+        if action.startswith("dash_adaptive_review:"):
+            symbol = action.split(":", 1)[1]
+            state = self.bot_service.get_bot_state(symbol)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+
+            text = self.bot_service.adaptive_review(state.bot_id)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"📊 <b>ADAPTIVE REVIEW</b>\n\n{escape_html(text)}",
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            await query.answer("📊 Adaptive review")
+            return
+
+        if action.startswith("dash_post_mortem:"):
+            symbol = action.split(":", 1)[1]
+            state = self.bot_service.get_bot_state(symbol)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+
+            text = self.bot_service.post_mortem(state.bot_id)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"🧾 <b>POST-MORTEM</b>\n\n{escape_html(text)}",
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            await query.answer("🧾 Post-mortem")
+            return
+
+        if action.startswith("dash_last_trades:"):
+            symbol = action.split(":", 1)[1]
+            state = self.bot_service.get_bot_state(symbol)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+
+            text = self._render_last_trades(
+                self.bot_service.get_last_trades(state.bot_id, limit=5)
+            )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            await query.answer("📦 Last trades")
+            return
+
         if action.startswith("dash_open:"):
             symbol = action.split(":", 1)[1]
             state = self.bot_service.get_bot_state(symbol)
@@ -1630,7 +1688,11 @@ class Controller:
         text = (
             "🤖 <b>HERMES — Trading Bot Assistant</b>\n\n"
             "Use /start to open the menu.\n"
-            "Use buttons for guided setup.\n"
+            "Use buttons for guided setup.\n\n"
+            "<b>Commands</b>\n"
+            "/adaptive_review [BOT_ID|SYMBOL]\n"
+            "/post_mortem [BOT_ID|SYMBOL]\n"
+            "/last_trades [BOT_ID|SYMBOL]\n"
         )
         keyboard = [[InlineKeyboardButton("⬅️ Main menu", callback_data="main_menu")]]
 
@@ -1639,3 +1701,107 @@ class Controller:
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.HTML,
         )
+
+    def _resolve_bot_id(self, args: list[str], *, usage: str) -> tuple[str | None, str | None]:
+        states = self.bot_service.get_all_states()
+        if not states:
+            return None, "🤷 <b>No bots running</b>"
+
+        if args:
+            token = args[0]
+            state = self.bot_service.get_bot_state_by_id(token)
+            if state:
+                return state.bot_id, None
+            state = self.bot_service.get_bot_state(token)
+            if state:
+                return state.bot_id, None
+            return None, f"❌ Bot not found: <code>{escape_html(token)}</code>"
+
+        if len(states) == 1:
+            return states[0].bot_id, None
+
+        return None, f"Usage: {usage}"
+
+    async def adaptive_review(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        bot_id, error = self._resolve_bot_id(
+            context.args,
+            usage="/adaptive_review <BOT_ID|SYMBOL>",
+        )
+        if error:
+            await update.message.reply_text(error, parse_mode=ParseMode.HTML)
+            return
+
+        body = self.bot_service.adaptive_review(bot_id)
+        text = f"📊 <b>ADAPTIVE REVIEW</b>\n\n{escape_html(body)}"
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+
+    async def post_mortem(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        bot_id, error = self._resolve_bot_id(
+            context.args,
+            usage="/post_mortem <BOT_ID|SYMBOL>",
+        )
+        if error:
+            await update.message.reply_text(error, parse_mode=ParseMode.HTML)
+            return
+
+        body = self.bot_service.post_mortem(bot_id)
+        text = f"🧾 <b>POST-MORTEM</b>\n\n{escape_html(body)}"
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+
+    async def last_trades(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        bot_id, error = self._resolve_bot_id(
+            context.args,
+            usage="/last_trades <BOT_ID|SYMBOL>",
+        )
+        if error:
+            await update.message.reply_text(error, parse_mode=ParseMode.HTML)
+            return
+
+        trades = self.bot_service.get_last_trades(bot_id, limit=5)
+        text = self._render_last_trades(trades)
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+
+    def _render_last_trades(self, trades: list[dict]) -> str:
+        if not trades:
+            return "No trades yet."
+
+        lines = ["📦 <b>LAST 5 TRADES</b>", ""]
+        for idx, trade in enumerate(trades, start=1):
+            raw_pnl = trade.get("trade_pnl", 0.0)
+            try:
+                pnl = float(raw_pnl)
+            except (TypeError, ValueError):
+                pnl = 0.0
+
+            spent_raw = trade.get("usdt_spent")
+            try:
+                spent = float(spent_raw) if spent_raw is not None else None
+            except (TypeError, ValueError):
+                spent = None
+            pct = f"{(pnl / spent) * 100:.2f}%" if spent and spent > 0 else "—"
+
+            reason = trade.get("reason") or "—"
+            side = trade.get("side") or "?"
+            symbol = trade.get("symbol") or "?"
+            ts = trade.get("timestamp") or ""
+
+            lines.append(
+                f"<b>#{idx}</b> {escape_html(ts)}\n"
+                f"{escape_html(side)} <code>{escape_html(symbol)}</code>\n"
+                f"PnL: {pnl:+.4f} USDT ({pct})\n"
+                f"Reason: <i>{escape_html(str(reason))}</i>\n"
+            )
+
+        return "\n".join(lines)

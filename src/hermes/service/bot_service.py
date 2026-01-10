@@ -8,6 +8,7 @@ from hermes.service.bot_builder import BotBuilder
 from hermes.config.bot_config_store import save_config
 from hermes.reporting.trade_reporter import TradeReporter
 from hermes.utils.adaptive_controller import AdaptiveController
+from hermes.reporting.post_mortem_audit import PostMortemAuditor
 from hermes.service.bot_state import BotRuntimeState
 from hermes.utils.bot import Bot
 from hermes.providers.binance import Binance
@@ -65,6 +66,11 @@ class BotService:
             config=config,
             trading_mode=initial_mode,
         )
+
+        if config.profile in {"sentinel", "equilibrium"}:
+            state.read_only = True
+            state.read_only_until = time.time() + 60 * 60
+            state.read_only_reason = "warmup_60m"
 
         if state.trading_mode == TradingMode.LIVE:
             state.live_authorized = True
@@ -274,3 +280,48 @@ class BotService:
         if not file_path.exists():
             return None
         return str(file_path)
+
+    def adaptive_review(self, bot_id: str, limit: int = 10) -> str:
+        trades = self.reporter.get_recent_trades(
+            bot_id=bot_id,
+            limit=limit,
+            side="SELL",
+        )
+        if not trades:
+            return "No trades found."
+
+        metrics = self.adaptive_controller.compute_metrics(trades)
+        state = self.get_bot_state_by_id(bot_id)
+        current_state = state.adaptive_state if state else "NORMAL"
+        expected_state, reason = self.adaptive_controller.decide_target_state(
+            metrics,
+            current_state=current_state,
+        )
+
+        flip_rate = "—"
+        if metrics.flip_rate is not None:
+            flip_rate = f"{metrics.flip_rate:.2f}"
+
+        lines = [
+            f"Bot: {bot_id}",
+            f"Profile: {state.profile if state else '—'}",
+            "",
+            f"Trades analyzed: {metrics.total_trades}",
+            f"Win rate: {metrics.win_rate:.2f}",
+            f"Cumulative PnL: {metrics.cumulative_pnl:+.4f}",
+            f"Drawdown: {metrics.drawdown_pct * 100:.2f}%",
+            f"Negative streak: {metrics.negative_streak}",
+            f"Flip rate: {flip_rate}",
+            "",
+            f"Expected state: {expected_state}",
+            "Reason:",
+            f"- {reason or '—'}",
+        ]
+        return "\n".join(lines)
+
+    def post_mortem(self, bot_id: str, limit: int = 30) -> str:
+        auditor = PostMortemAuditor(self.reporter, self.adaptive_controller)
+        return auditor.generate_summary(bot_id=bot_id, limit=limit)
+
+    def get_last_trades(self, bot_id: str, limit: int = 5) -> list[dict]:
+        return self.reporter.get_last_trades(bot_id=bot_id, limit=limit)

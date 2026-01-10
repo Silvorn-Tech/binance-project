@@ -18,6 +18,9 @@ class BotRuntimeState:
     live_authorized: bool = False
     live_authorized_at: Optional[float] = None
     awaiting_fresh_entry: bool = False
+    read_only: bool = False
+    read_only_until: Optional[float] = None
+    read_only_reason: Optional[str] = None
 
     # Runtime flags
     running: bool = False
@@ -64,8 +67,10 @@ class BotRuntimeState:
     # Adaptive control
     adaptive_state: str = "NORMAL"
     adaptive_reason: Optional[str] = None
+    adaptive_prev_state: Optional[str] = None
     adaptive_max_buys_per_day: Optional[int] = None
     adaptive_cooldown_after_sell_seconds: Optional[float] = None
+    adaptive_sleep_until: Optional[float] = None
 
     # AI / Analysis
     ai_mode: str = "SHADOW"

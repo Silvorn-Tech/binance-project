@@ -22,3 +22,4 @@
 logs/
 src/binance_project.egg-info/
 src/sentinel_bot.egg-info/**
+configs/

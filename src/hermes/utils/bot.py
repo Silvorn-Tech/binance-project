@@ -14,6 +14,7 @@ from hermes.providers.binance import Binance
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from hermes.providers.Telegram import TelegramNotifier
 from hermes.reporting.trade_reporter import TradeReporter
+from hermes.reporting.post_mortem_audit import PostMortemAuditor
 from hermes.providers.market_data import MarketData
 from hermes.utils.trading_mode import TradingMode
 from hermes.utils.adaptive_controller import AdaptiveController
@@ -77,6 +78,7 @@ class Bot(Thread):
         self._base_trailing_pct = config.trailing_pct
         self._base_max_buys_per_day = config.max_buys_per_day
         self._base_cooldown_after_sell_seconds = config.cooldown_after_sell_seconds
+        self._adaptive_sleep_seconds = 30 * 60
 
         # Initial snapshot
         self._set_state(
@@ -94,6 +96,9 @@ class Bot(Thread):
             user_confirmed_buy=False,
             vortex_signal_ignored=False,
             capital_skip_notified=False,
+            read_only=False,
+            read_only_until=None,
+            read_only_reason=None,
             open_position_spent=0.0,
             buys_today=0,
             spent_today=0.0,
@@ -104,8 +109,10 @@ class Bot(Thread):
             arm_price=None,
             adaptive_state="NORMAL",
             adaptive_reason=None,
+            adaptive_prev_state=None,
             adaptive_max_buys_per_day=None,
             adaptive_cooldown_after_sell_seconds=None,
+            adaptive_sleep_until=None,
             ai_mode=AI_MODE.value,
             ai_market_regime=None,
             ai_regime_confidence=None,
@@ -149,6 +156,40 @@ class Bot(Thread):
     def _effective_trailing_pct(self) -> float:
         return self.state.trailing_pct or self.config.trailing_pct
 
+    def _update_read_only_state(self) -> None:
+        if not self.state.read_only or self.state.read_only_until is None:
+            return
+        if time.time() < self.state.read_only_until:
+            return
+        self._set_state(
+            read_only=False,
+            read_only_until=None,
+            read_only_reason=None,
+        )
+
+    def _is_sleep_active(self) -> bool:
+        if self.state.adaptive_state != "SLEEP":
+            return False
+        sleep_until = self.state.adaptive_sleep_until
+        if sleep_until is None:
+            return True
+        return time.time() < sleep_until
+
+    def _sleep_expired(self) -> bool:
+        if self.state.adaptive_state != "SLEEP":
+            return False
+        sleep_until = self.state.adaptive_sleep_until
+        if sleep_until is None:
+            return False
+        return time.time() >= sleep_until
+
+    def _should_block_entry(self) -> str | None:
+        if self.state.read_only:
+            return "READ_ONLY_WARMUP"
+        if self._is_sleep_active():
+            return "ADAPTIVE_SLEEP"
+        return None
+
     def apply_adaptive_state(self, adaptive_state: str, reason: str | None = None) -> None:
         if adaptive_state == "DEFENSIVE":
             trailing_pct = max(self._base_trailing_pct * 0.8, 0.001)
@@ -157,18 +198,50 @@ class Bot(Thread):
             self._set_state(
                 adaptive_state="DEFENSIVE",
                 adaptive_reason=reason,
+                adaptive_prev_state=self.state.adaptive_state,
                 adaptive_max_buys_per_day=max_buys,
                 adaptive_cooldown_after_sell_seconds=cooldown,
                 trailing_pct=trailing_pct,
+                adaptive_sleep_until=None,
+            )
+            return
+
+        if adaptive_state == "COOLDOWN_EXTENDED":
+            trailing_pct = max(self._base_trailing_pct * 0.7, 0.001)
+            max_buys = max(int(self._base_max_buys_per_day * 0.3), 1)
+            cooldown = max(self._base_cooldown_after_sell_seconds * 2.5, 1.0)
+            self._set_state(
+                adaptive_state="COOLDOWN_EXTENDED",
+                adaptive_reason=reason,
+                adaptive_prev_state=self.state.adaptive_state,
+                adaptive_max_buys_per_day=max_buys,
+                adaptive_cooldown_after_sell_seconds=cooldown,
+                trailing_pct=trailing_pct,
+                adaptive_sleep_until=None,
+            )
+            return
+
+        if adaptive_state == "SLEEP":
+            sleep_until = time.time() + self._adaptive_sleep_seconds
+            self._set_state(
+                adaptive_state="SLEEP",
+                adaptive_reason=reason,
+                adaptive_prev_state=self.state.adaptive_state,
+                adaptive_max_buys_per_day=None,
+                adaptive_cooldown_after_sell_seconds=None,
+                trailing_pct=self._base_trailing_pct,
+                adaptive_sleep_until=sleep_until,
             )
             return
 
         self._set_state(
             adaptive_state="NORMAL",
             adaptive_reason=reason,
+            adaptive_prev_state=self.state.adaptive_state,
             adaptive_max_buys_per_day=None,
             adaptive_cooldown_after_sell_seconds=None,
             trailing_pct=self._base_trailing_pct,
+            adaptive_sleep_until=None,
         )
 
     # =========================
@@ -236,6 +309,9 @@ class Bot(Thread):
                     max_price or entry_price,
                 )
 
+        if self.state.read_only:
+            self._preload_metrics()
+
         while self._running:
             try:
                 self._heartbeat()
@@ -256,6 +332,14 @@ class Bot(Thread):
     def stop(self):
         self._running = False
 
+    def _preload_metrics(self) -> None:
+        try:
+            with SessionLocal() as session:
+                profile_id, asset_id = self._ensure_profile_asset(session)
+                self._get_cycle_regime(session, profile_id, asset_id)
+        except Exception as e:
+            logger.warning("Metrics preload failed: %s", e)
+
     def _heartbeat(self):
         now = time.monotonic()
         if now - self._last_heartbeat >= HEARTBEAT_EVERY_SECONDS:
@@ -273,6 +357,9 @@ class Bot(Thread):
     # =========================
     def _trade_cycle(self):
         self._cycle_regime = None
+        self._update_read_only_state()
+        if self._sleep_expired():
+            self.apply_adaptive_state("NORMAL", reason="sleep_expired")
         if self.state.trading_mode != TradingMode.LIVE and self.binance is not None:
             logger.warning("⚠️ Binance injected outside LIVE mode")
         # Daily reset
@@ -425,7 +512,22 @@ class Bot(Thread):
             waiting_for_confirmation=False,
         )
 
-        if not self._entry_signal():
+        signal = self._entry_signal()
+        block_reason = self._should_block_entry()
+        if block_reason is not None:
+            self._set_state(
+                last_action=block_reason,
+                waiting_for_signal=False,
+                waiting_for_confirmation=False,
+            )
+            self._log_no_trade_decision(
+                reason=block_reason.lower(),
+                min_interval_seconds=300.0,
+            )
+            time.sleep(10)
+            return
+
+        if not signal:
             self._set_state(
                 last_action="WAIT_SIGNAL",
                 waiting_for_signal=True,
@@ -915,6 +1017,12 @@ class Bot(Thread):
                 self.adaptive_controller.evaluate(self)
             except Exception as e:
                 logger.warning("Adaptive evaluation failed: %s", e)
+        if self.reporter is not None:
+            try:
+                auditor = PostMortemAuditor(self.reporter, self.adaptive_controller)
+                auditor.write_latest_summary(self.config.bot_id)
+            except Exception as e:
+                logger.warning("Post-mortem audit failed: %s", e)
         clear_state(self.config.symbol)
 
         if self.state.trading_mode == TradingMode.LIVE and self.state.real_capital_enabled:
