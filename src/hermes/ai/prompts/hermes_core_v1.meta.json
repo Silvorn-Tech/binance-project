@@ -1,0 +1,9 @@
+{
+  "name": "hermes_core_v1",
+  "version": "1.0.0",
+  "role": "system_prompt",
+  "format": "text/plain",
+  "language": "es-en",
+  "purpose": "Hermes AI core decision filter prompt",
+  "source": "user-provided master prompt"
+}

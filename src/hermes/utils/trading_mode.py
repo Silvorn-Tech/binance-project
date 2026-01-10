@@ -5,3 +5,4 @@ class TradingMode(str, Enum):
     SIMULATION = "simulation"
     ARMED = "armed"
     LIVE = "live"
+    AI = "ai"

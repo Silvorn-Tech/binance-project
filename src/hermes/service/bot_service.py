@@ -1,4 +1,5 @@
 import time
+from dataclasses import replace
 from loguru import logger
 from datetime import datetime
 from pathlib import Path
@@ -51,11 +52,7 @@ class BotService:
             config.profile,
         )
 
-        initial_mode = (
-            TradingMode.SIMULATION
-            if config.profile == "vortex"
-            else TradingMode.LIVE
-        )
+        initial_mode = TradingMode.AI
 
         state = BotRuntimeState(
             bot_id=config.bot_id,
@@ -65,9 +62,12 @@ class BotService:
             trailing_pct=config.trailing_pct,
             config=config,
             trading_mode=initial_mode,
+            ai_enabled=True,
+            ai_snapshot_started_at=time.time(),
+            ai_mode="ADM",
         )
 
-        if config.profile in {"sentinel", "equilibrium"}:
+        if config.profile in {"sentinel", "equilibrium"} and state.trading_mode == TradingMode.LIVE:
             state.read_only = True
             state.read_only_until = time.time() + 60 * 60
             state.read_only_reason = "warmup_60m"
@@ -171,6 +171,160 @@ class BotService:
         if not bot:
             return
         bot.binance = None
+
+    def enable_ai_mode(self, symbol: str) -> None:
+        bot = self._bots.get(symbol.upper())
+        if not bot:
+            raise RuntimeError(f"No running bot for {symbol}")
+        if bot.open_position_spent <= 0:
+            bot.binance = None
+        bot.state.trading_mode = TradingMode.AI
+        bot.state.ai_enabled = True
+        bot.state.ai_snapshot_started_at = time.time()
+        bot.state.ai_recommendation = None
+        bot.state.ai_confidence = None
+        bot.state.ai_last_decision_at = None
+        bot.state.ai_mode = "ADM"
+        bot.state.live_authorized = False
+        bot.state.real_capital_enabled = False
+        bot.state.ai_pending_recommendation = False
+        bot.state.ai_last_recommendation_id = None
+        bot.state.ai_last_recommendation_message_id = None
+
+    def disable_ai_mode(self, symbol: str) -> None:
+        bot = self._bots.get(symbol.upper())
+        if not bot:
+            raise RuntimeError(f"No running bot for {symbol}")
+        bot.state.ai_enabled = False
+        bot.state.ai_snapshot_started_at = None
+        bot.state.ai_mode = "SHADOW"
+
+    def authorize_recovery(self, symbol: str) -> BotRuntimeState:
+        bot = self._bots.get(symbol.upper())
+        if not bot:
+            raise RuntimeError(f"No running bot for {symbol}")
+
+        bot.binance = self.binance
+        bot.state.trading_mode = TradingMode.LIVE
+        bot.state.live_authorized = True
+        bot.state.live_authorized_at = time.time()
+        bot.state.read_only = True
+        bot.state.read_only_until = None
+        bot.state.read_only_reason = "recovery_close_only"
+        bot.state.ai_enabled = False
+        bot.state.ai_mode = "SHADOW"
+        bot.rehydrate_open_position()
+
+        return bot.state
+
+    def enter_live_from_ai(self, symbol: str, *, allow_override: bool = False) -> BotRuntimeState:
+        state = self.get_bot_state(symbol)
+        if not state or not state.config:
+            raise RuntimeError(f"No running bot for {symbol}")
+
+        recommendation = state.ai_recommendation or {}
+        if not recommendation:
+            raise RuntimeError("No AI recommendation available")
+
+        profile_map = {
+            "SENTINEL": "sentinel",
+            "EQUILIBRIUM": "equilibrium",
+            "VORTEX": "vortex",
+        }
+        recommended_profile_raw = str(recommendation.get("recommended_profile", "")).upper()
+        if recommended_profile_raw == "NO_TRADE":
+            raise RuntimeError("AI recommended NO_TRADE")
+        recommended_profile = profile_map.get(recommended_profile_raw)
+        if recommended_profile is None:
+            raise RuntimeError("Invalid AI recommended profile")
+
+        if allow_override:
+            target_profile = state.profile
+            config = state.config
+            override_flag = True
+            override_reason = "user_confirmed"
+        else:
+            target_profile = recommended_profile
+            base_asset = state.base_asset or state.config.base_asset
+            config = (
+                BotBuilder()
+                .with_symbol(symbol, base_asset)
+                .with_profile(target_profile)
+                .with_defaults()
+                .build()
+            )
+            config = replace(
+                config,
+                bot_id=state.bot_id,
+                kline_interval=state.config.kline_interval,
+                kline_limit=state.config.kline_limit,
+                cooldown_after_sell_seconds=state.config.cooldown_after_sell_seconds,
+                trend_exit_enabled=state.config.trend_exit_enabled,
+                trend_sma_period=state.config.trend_sma_period,
+                max_hold_seconds_without_new_high=state.config.max_hold_seconds_without_new_high,
+            )
+            config = self._apply_ai_risk_caps(
+                current_config=state.config,
+                recommended_config=config,
+            )
+            override_flag = False
+            override_reason = None
+
+        self.restart_bot_with_config(state.bot_id, config)
+        new_state = self.get_bot_state_by_id(state.bot_id)
+        if not new_state:
+            new_state = self.get_bot_state(symbol)
+        if not new_state:
+            raise RuntimeError("Failed to load bot after AI transition")
+
+        new_state.trading_mode = TradingMode.LIVE
+        new_state.live_authorized = True
+        new_state.live_authorized_at = time.time()
+        new_state.awaiting_fresh_entry = True
+        new_state.read_only = True
+        new_state.read_only_until = time.time() + 10 * 60
+        new_state.read_only_reason = "ai_warmup"
+        new_state.ai_enabled = False
+        new_state.ai_mode = "SHADOW"
+        new_state.ai_override = override_flag
+        new_state.ai_override_reason = override_reason
+        new_state.ai_pending_recommendation = False
+        new_state.ai_last_recommendation_id = None
+        new_state.ai_last_recommendation_message_id = None
+        self.enable_live(symbol)
+
+        return new_state
+
+    def _apply_ai_risk_caps(
+        self,
+        *,
+        current_config: BotConfig,
+        recommended_config: BotConfig,
+    ) -> BotConfig:
+        capped_capital_pct = min(current_config.capital_pct, recommended_config.capital_pct)
+        capped_trade_pct = min(current_config.trade_pct, recommended_config.trade_pct)
+        capped_max_buys = min(current_config.max_buys_per_day, recommended_config.max_buys_per_day)
+        capped_daily_budget = min(current_config.daily_budget_usdt, recommended_config.daily_budget_usdt)
+        capped_trailing = max(current_config.trailing_pct, recommended_config.trailing_pct)
+
+        disable_max_buys = recommended_config.disable_max_buys_per_day
+        if current_config.disable_max_buys_per_day is False:
+            disable_max_buys = False
+
+        disable_daily_budget = recommended_config.disable_daily_budget
+        if current_config.disable_daily_budget is False:
+            disable_daily_budget = False
+
+        return replace(
+            recommended_config,
+            capital_pct=capped_capital_pct,
+            trade_pct=capped_trade_pct,
+            max_buys_per_day=capped_max_buys,
+            daily_budget_usdt=capped_daily_budget,
+            trailing_pct=capped_trailing,
+            disable_max_buys_per_day=disable_max_buys,
+            disable_daily_budget=disable_daily_budget,
+        )
 
     def stop_all(self) -> None:
         logger.warning("🛑 Stopping ALL bots")

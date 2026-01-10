@@ -273,6 +273,16 @@ class Controller:
         except BadRequest as e:
             if "Message is not modified" in str(e):
                 return
+            if "message to edit not found" in str(e).lower():
+                msg = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+                self._menu_message_id[chat_id] = msg.message_id
+                return
             raise
 
     def _profile_ttl(self, profile: str | None, default: int) -> int:
@@ -346,6 +356,33 @@ class Controller:
                 [
                     [InlineKeyboardButton("✅ Yes, invest real capital", callback_data=f"vortex_live_yes:{state.symbol}")],
                     [InlineKeyboardButton("❌ No, keep simulating", callback_data=f"vortex_live_no:{state.symbol}")],
+                ]
+            ),
+        )
+
+    async def _send_ai_vortex_confirmation(
+        self,
+        *,
+        context,
+        chat_id: int,
+        symbol: str,
+        rec_id: str,
+    ):
+        text = (
+            "⚠️ <b>VORTEX CONFIRMATION REQUIRED</b>\n\n"
+            "AI recommends <b>VORTEX</b>, which is high risk.\n"
+            "Do you want to proceed to LIVE with this profile?"
+        )
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("✅ Confirm VORTEX", callback_data=f"ai_accept_vortex:{symbol}:{rec_id}")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data=f"ai_reject:{symbol}:{rec_id}")],
                 ]
             ),
         )
@@ -1170,6 +1207,7 @@ class Controller:
                     [[InlineKeyboardButton("🗑️ Delete", callback_data="delete_self")]]
                 ),
             )
+            await self._send_main_menu(chat_id=chat_id, context=context)
             await query.answer("Cancelled")
             return
 
@@ -1302,6 +1340,391 @@ class Controller:
                 disable_web_page_preview=True,
             )
             await query.answer("📦 Last trades")
+            return
+
+        if action.startswith("ai_enable:"):
+            symbol = action.split(":", 1)[1]
+            state = self.bot_service.get_bot_state(symbol)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+
+            try:
+                self.bot_service.enable_ai_mode(symbol)
+            except Exception as e:
+                await query.answer(f"❌ {str(e)}", show_alert=True)
+                return
+
+            notifier = self.bot_service.get_notifier(symbol)
+            await notifier.render_bot_dashboard(state, force=True)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "🤖 <b>AI MODE ENABLED</b>\n\n"
+                    "Hermes is running shadow simulation and collecting market metrics.\n"
+                    "You'll receive a recommendation once the snapshot window is complete."
+                ),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            await query.answer("🤖 AI mode enabled")
+            return
+
+        if action.startswith("ai_review:"):
+            symbol = action.split(":", 1)[1]
+            state = self.bot_service.get_bot_state(symbol)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+
+            text = self._render_ai_recommendation(state)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            await query.answer("📊 AI review")
+            return
+
+        if action.startswith("ai_accept:"):
+            parts = action.split(":", 2)
+            symbol = parts[1] if len(parts) > 1 else ""
+            rec_id = parts[2] if len(parts) > 2 else None
+            state = self.bot_service.get_bot_state(symbol)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+            if not state.ai_pending_recommendation or not state.ai_last_recommendation_id:
+                await query.answer("No active recommendation", show_alert=True)
+                return
+            if rec_id and rec_id != state.ai_last_recommendation_id:
+                await query.answer("Recommendation expired", show_alert=True)
+                return
+
+            rec = state.ai_recommendation or {}
+            decision = rec.get("decision")
+            confidence = rec.get("confidence")
+            recommended_profile = rec.get("recommended_profile")
+
+            if decision != "ENABLE_TRADING":
+                await query.answer("AI decision not approved for LIVE", show_alert=True)
+                return
+
+            if str(recommended_profile).upper() == "NO_TRADE":
+                await query.answer("AI recommended NO_TRADE", show_alert=True)
+                return
+
+            if not isinstance(confidence, (int, float)) or confidence < 0.6:
+                await query.answer("Confidence too low for LIVE", show_alert=True)
+                return
+
+            if str(recommended_profile).upper() == "VORTEX":
+                await self._send_ai_vortex_confirmation(
+                    context=context,
+                    chat_id=chat_id,
+                    symbol=symbol,
+                    rec_id=state.ai_last_recommendation_id,
+                )
+                await query.answer("⚠️ Vortex confirmation required")
+                return
+            try:
+                state = self.bot_service.enter_live_from_ai(symbol)
+            except Exception as e:
+                await query.answer(f"❌ {str(e)}", show_alert=True)
+                return
+
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "✅ <b>AI RECOMMENDATION ACCEPTED</b>\n\n"
+                    f"Profile: <code>{escape_html(state.profile)}</code>\n"
+                    "Mode: LIVE (warmup)\n"
+                    "Hermes will wait for a fresh entry signal."
+                ),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await query.answer("✅ Live enabled")
+            return
+
+        if action.startswith("ai_accept_vortex:"):
+            parts = action.split(":", 2)
+            symbol = parts[1] if len(parts) > 1 else ""
+            rec_id = parts[2] if len(parts) > 2 else None
+            state = self.bot_service.get_bot_state(symbol)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+            if not state.ai_pending_recommendation or not state.ai_last_recommendation_id:
+                await query.answer("No active recommendation", show_alert=True)
+                return
+            if rec_id and rec_id != state.ai_last_recommendation_id:
+                await query.answer("Recommendation expired", show_alert=True)
+                return
+
+            rec = state.ai_recommendation or {}
+            decision = rec.get("decision")
+            confidence = rec.get("confidence")
+            recommended_profile = rec.get("recommended_profile")
+
+            if decision != "ENABLE_TRADING":
+                await query.answer("AI decision not approved for LIVE", show_alert=True)
+                return
+            if str(recommended_profile).upper() != "VORTEX":
+                await query.answer("AI does not recommend VORTEX", show_alert=True)
+                return
+            if not isinstance(confidence, (int, float)) or confidence < 0.6:
+                await query.answer("Confidence too low for LIVE", show_alert=True)
+                return
+
+            original_message_id = state.ai_last_recommendation_message_id
+            try:
+                state = self.bot_service.enter_live_from_ai(symbol)
+            except Exception as e:
+                await query.answer(f"❌ {str(e)}", show_alert=True)
+                return
+
+            if original_message_id is not None:
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=original_message_id)
+                except Exception:
+                    pass
+
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "✅ <b>VORTEX CONFIRMED</b>\n\n"
+                    f"Profile: <code>{escape_html(state.profile)}</code>\n"
+                    "Mode: LIVE (warmup)\n"
+                    "Hermes will wait for a fresh entry signal."
+                ),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await query.answer("✅ Live enabled")
+            return
+
+        if action.startswith("ai_override_prompt:"):
+            parts = action.split(":", 2)
+            symbol = parts[1] if len(parts) > 1 else ""
+            rec_id = parts[2] if len(parts) > 2 else None
+            state = self.bot_service.get_bot_state(symbol)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+            if not state.ai_pending_recommendation or not state.ai_last_recommendation_id:
+                await query.answer("No active recommendation", show_alert=True)
+                return
+            if rec_id and rec_id != state.ai_last_recommendation_id:
+                await query.answer("Recommendation expired", show_alert=True)
+                return
+
+            rec = state.ai_recommendation or {}
+            recommended_profile = rec.get("recommended_profile")
+            if not recommended_profile or str(recommended_profile).upper() == "NO_TRADE":
+                await query.answer("No AI recommendation available", show_alert=True)
+                return
+
+            if str(recommended_profile).lower() == state.profile.lower():
+                await query.answer("AI recommendation already matches profile", show_alert=True)
+                return
+
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "⚠️ <b>AI OVERRIDE REQUEST</b>\n\n"
+                    f"AI recommends: <code>{escape_html(str(recommended_profile))}</code>\n"
+                    f"Current profile: <code>{escape_html(state.profile)}</code>\n\n"
+                    "This increases risk. Do you want to proceed anyway?"
+                ),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [InlineKeyboardButton("✅ Confirm override", callback_data=f"ai_override_yes:{symbol}:{state.ai_last_recommendation_id}")],
+                        [InlineKeyboardButton("❌ Cancel", callback_data=f"ai_override_no:{symbol}:{state.ai_last_recommendation_id}")],
+                    ]
+                ),
+            )
+            await query.answer("⚠️ Override confirmation sent")
+            return
+
+        if action.startswith("ai_override_yes:"):
+            parts = action.split(":", 2)
+            symbol = parts[1] if len(parts) > 1 else ""
+            rec_id = parts[2] if len(parts) > 2 else None
+            state = self.bot_service.get_bot_state(symbol)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+            if not state.ai_pending_recommendation or not state.ai_last_recommendation_id:
+                await query.answer("No active recommendation", show_alert=True)
+                return
+            if rec_id and rec_id != state.ai_last_recommendation_id:
+                await query.answer("Recommendation expired", show_alert=True)
+                return
+
+            rec = state.ai_recommendation or {}
+            decision = rec.get("decision")
+            confidence = rec.get("confidence")
+            if decision != "ENABLE_TRADING":
+                await query.answer("AI decision not approved for LIVE", show_alert=True)
+                return
+            if not isinstance(confidence, (int, float)) or confidence < 0.6:
+                await query.answer("Confidence too low for LIVE", show_alert=True)
+                return
+
+            original_message_id = state.ai_last_recommendation_message_id
+            try:
+                state = self.bot_service.enter_live_from_ai(symbol, allow_override=True)
+            except Exception as e:
+                await query.answer(f"❌ {str(e)}", show_alert=True)
+                return
+
+            if original_message_id is not None:
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=original_message_id)
+                except Exception:
+                    pass
+
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "⚠️ <b>AI OVERRIDE CONFIRMED</b>\n\n"
+                    f"Profile: <code>{escape_html(state.profile)}</code>\n"
+                    "Mode: LIVE (warmup)\n"
+                    "Override logged."
+                ),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await query.answer("⚠️ Override applied")
+            return
+
+        if action.startswith("ai_override_no:"):
+            parts = action.split(":", 2)
+            symbol = parts[1] if len(parts) > 1 else ""
+            rec_id = parts[2] if len(parts) > 2 else None
+            state = self.bot_service.get_bot_state(symbol)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+            if not state.ai_pending_recommendation or not state.ai_last_recommendation_id:
+                await query.answer("No active recommendation", show_alert=True)
+                return
+            if rec_id and rec_id != state.ai_last_recommendation_id:
+                await query.answer("Recommendation expired", show_alert=True)
+                return
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await query.answer("✅ Override cancelled")
+            return
+
+        if action.startswith("ai_reject:"):
+            parts = action.split(":", 2)
+            symbol = parts[1] if len(parts) > 1 else ""
+            rec_id = parts[2] if len(parts) > 2 else None
+            state = self.bot_service.get_bot_state(symbol)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+            if not state.ai_pending_recommendation or not state.ai_last_recommendation_id:
+                await query.answer("No active recommendation", show_alert=True)
+                return
+            if rec_id and rec_id != state.ai_last_recommendation_id:
+                await query.answer("Recommendation expired", show_alert=True)
+                return
+
+            state.ai_recommendation = None
+            state.ai_confidence = None
+            state.ai_last_decision = None
+            state.ai_last_reason = None
+            state.ai_last_decision_at = None
+            state.ai_snapshot_started_at = time.time()
+            state.ai_pending_recommendation = False
+            state.ai_last_recommendation_id = None
+            state.ai_last_recommendation_message_id = None
+
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "❌ <b>Recommendation rejected</b>\n\n"
+                    "Hermes will keep observing and generate a new recommendation."
+                ),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await query.answer("❌ Rejected")
+            return
+
+        if action.startswith("recovery_enable:"):
+            symbol = action.split(":", 1)[1]
+            state = self.bot_service.get_bot_state(symbol)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+            try:
+                state = self.bot_service.authorize_recovery(symbol)
+            except Exception as e:
+                await query.answer(f"❌ {str(e)}", show_alert=True)
+                return
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "✅ <b>RECOVERY AUTHORIZED</b>\n\n"
+                    "LIVE access enabled to close the open position.\n"
+                    "No new entries will be opened."
+                ),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await query.answer("✅ Recovery authorized")
+            return
+
+        if action.startswith("recovery_ignore:"):
+            symbol = action.split(":", 1)[1]
+            state = self.bot_service.get_bot_state(symbol)
+            if not state:
+                await query.answer("No state found", show_alert=True)
+                return
+            state.last_action = "RECOVERY_IGNORED"
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "❌ <b>RECOVERY IGNORED</b>\n\n"
+                    "Hermes will stay in AI mode."
+                ),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await query.answer("❌ Recovery ignored")
             return
 
         if action.startswith("dash_open:"):
@@ -1644,6 +2067,7 @@ class Controller:
                 [[InlineKeyboardButton("🗑️ Delete", callback_data="delete_self")]]
             ),
         )
+        await self._send_main_menu(chat_id=update.effective_chat.id, context=context)
 
     async def stop_bot(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args:
@@ -1805,3 +2229,25 @@ class Controller:
             )
 
         return "\n".join(lines)
+
+    def _render_ai_recommendation(self, state: BotRuntimeState) -> str:
+        rec = state.ai_recommendation or {}
+        if not rec:
+            return "🤖 <b>HERMES AI</b>\n\nNo recommendation available yet."
+
+        confidence = rec.get("confidence")
+        confidence_pct = f"{confidence * 100:.0f} %" if isinstance(confidence, (int, float)) else "—"
+
+        tags = rec.get("reasoning_tags") or []
+        tags_text = "\n".join([f"• {escape_html(str(tag))}" for tag in tags]) if tags else "—"
+
+        return (
+            "🤖 <b>HERMES AI — RECOMENDACIÓN</b>\n\n"
+            f"<b>Mercado:</b> {escape_html(str(rec.get('market_regime', '—')))}\n"
+            f"<b>Activo:</b> <code>{escape_html(state.symbol)}</code>\n"
+            f"<b>Perfil sugerido:</b> {escape_html(str(rec.get('recommended_profile', '—')))}\n"
+            f"<b>Decisión:</b> {escape_html(str(rec.get('decision', '—')))}\n"
+            f"<b>Confianza:</b> {confidence_pct}\n\n"
+            "<b>Razones:</b>\n"
+            f"{tags_text}"
+        )

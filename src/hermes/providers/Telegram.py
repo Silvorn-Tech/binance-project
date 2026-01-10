@@ -121,6 +121,7 @@ class TelegramNotifier:
                 TradingMode.SIMULATION: "🧪 SIMULATION",
                 TradingMode.ARMED: "🟡 ARMED",
                 TradingMode.LIVE: "💰 LIVE",
+                TradingMode.AI: "🤖 AI MODE",
             }.get(state.trading_mode, str(state.trading_mode))
 
         trend = "—"
@@ -204,12 +205,14 @@ class TelegramNotifier:
             f"<b>AI mode:</b> {state.ai_mode or '—'}",
             f"<b>Market regime:</b> {state.ai_market_regime or '—'}",
             f"<b>Regime confidence:</b> {fmt(state.ai_regime_confidence)}",
+            f"<b>AI confidence:</b> {fmt(state.ai_confidence)}",
             f"<b>Win rate (60m):</b> {pct(state.ai_win_rate_60m)} %",
             f"<b>Avg PnL (60m):</b> {fmt(state.ai_avg_pnl_60m, 4)} USDT",
             f"<b>PnL slope (60m):</b> {fmt(state.ai_pnl_slope_60m, 4)} USDT",
             f"<b>Max drawdown (60m):</b> {pct(state.ai_max_drawdown_60m)} %",
             f"<b>Last AI decision:</b> {state.ai_last_decision or '—'}",
             f"<b>Blocked by AI:</b> {yesno(state.ai_blocked_by_ai)}",
+            f"<b>AI override:</b> {yesno(state.ai_override)}",
             "",
         ]
 
@@ -267,6 +270,12 @@ class TelegramNotifier:
                 InlineKeyboardButton(
                     "📦 Last trades",
                     callback_data=f"dash_last_trades:{state.symbol}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🤖 AUTO-TRADING (AI)",
+                    callback_data=f"ai_enable:{state.symbol}",
                 ),
             ],
             [
@@ -333,7 +342,7 @@ class TelegramNotifier:
         delete_after: int = 5,
         silent: bool = False,
         reply_markup=None,
-    ) -> None:
+    ) -> int | None:
         if os.getenv("TELEGRAM_DEV_MODE") == "true":
             return
 
@@ -354,7 +363,7 @@ class TelegramNotifier:
             return
 
         if not delete_after or delete_after <= 0:
-            return
+            return msg.message_id
 
         def _delete():
             async def _delete_message():
@@ -374,6 +383,7 @@ class TelegramNotifier:
         timer = threading.Timer(delete_after, _delete)
         timer.daemon = True
         timer.start()
+        return msg.message_id
 
     async def _auto_delete(self, message_id: int, delay: int):
         await asyncio.sleep(delay)

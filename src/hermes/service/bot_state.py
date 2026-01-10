@@ -84,6 +84,16 @@ class BotRuntimeState:
     ai_last_decision: Optional[str] = None
     ai_last_reason: Optional[str] = None
     ai_blocked_by_ai: Optional[bool] = None
+    ai_enabled: bool = False
+    ai_snapshot_started_at: Optional[float] = None
+    ai_recommendation: Optional[dict] = None
+    ai_confidence: Optional[float] = None
+    ai_last_decision_at: Optional[float] = None
+    ai_override: bool = False
+    ai_override_reason: Optional[str] = None
+    ai_pending_recommendation: bool = False
+    ai_last_recommendation_id: Optional[str] = None
+    ai_last_recommendation_message_id: Optional[int] = None
 
     # Telegram
     telegram_message_id: Optional[int] = None

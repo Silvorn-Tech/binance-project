@@ -25,10 +25,16 @@ from hermes.repository.decision_repository import DecisionRepository
 from hermes.repository.performance_repository import PerformanceRepository
 from hermes.ai.regime_classifier import RegimeClassifier
 from hermes.ai.types import MarketRegime
+from hermes.ai.llm_client import HermesLLMClient
+from hermes.ai.llm_guard import LLMGuard
 
 BOGOTA_TZ = ZoneInfo("America/Bogota")
 HEARTBEAT_EVERY_SECONDS = 5.0
 VORTEX_ENTRY_THRESHOLD = 0.5
+AI_SNAPSHOT_WINDOW_SECONDS = 60 * 60
+AI_MIN_TRADES = 5
+AI_MIN_CONFIDENCE = 0.6
+AI_RECOMMENDATION_TTL_SECONDS = 10 * 60
 class AIMode(Enum):
     SHADOW = "SHADOW"
     ACTIVE = "ACTIVE"
@@ -124,6 +130,16 @@ class Bot(Thread):
             ai_last_decision=None,
             ai_last_reason=None,
             ai_blocked_by_ai=None,
+            ai_enabled=False,
+            ai_snapshot_started_at=None,
+            ai_recommendation=None,
+            ai_confidence=None,
+            ai_last_decision_at=None,
+            ai_override=False,
+            ai_override_reason=None,
+            ai_pending_recommendation=False,
+            ai_last_recommendation_id=None,
+            ai_last_recommendation_message_id=None,
         )
 
         logger.info(
@@ -184,6 +200,8 @@ class Bot(Thread):
         return time.time() >= sleep_until
 
     def _should_block_entry(self) -> str | None:
+        if self.state.trading_mode == TradingMode.AI:
+            return "AI_MODE_ANALYSIS"
         if self.state.read_only:
             return "READ_ONLY_WARMUP"
         if self._is_sleep_active():
@@ -248,7 +266,7 @@ class Bot(Thread):
     # Thread lifecycle
     # =========================
     def run(self):
-        if self.config.profile == "vortex":
+        if self.state.trading_mode == TradingMode.LIVE and self.config.profile == "vortex":
             self._set_state(
                 running=True,
                 last_action="WAIT_CONFIRMATION",
@@ -261,7 +279,7 @@ class Bot(Thread):
                 self.config.symbol,
                 self.config.profile,
             )
-        else:
+        elif self.state.trading_mode == TradingMode.LIVE:
             self.armed = True
             self._set_state(
                 running=True,
@@ -277,37 +295,33 @@ class Bot(Thread):
                 self.config.symbol,
                 self.config.profile,
             )
+        else:
+            self._set_state(
+                running=True,
+                last_action="AI_WARMUP",
+                waiting_for_confirmation=False,
+                waiting_for_signal=False,
+                armed=False,
+                live_authorized=False,
+                live_authorized_at=None,
+            )
+            logger.info(
+                "🤖 Bot in AI warmup | symbol=%s | profile=%s",
+                self.config.symbol,
+                self.config.profile,
+            )
 
-        persisted = None
-        if self.state.trading_mode == TradingMode.LIVE and self.binance is not None:
-            persisted = load_state(self.config.symbol)
+        persisted = load_state(self.config.symbol)
         if persisted and persisted.get("in_position"):
-            trailing_pct = persisted.get("trailing_pct", self.config.trailing_pct)
-            entry_price = persisted.get("entry_price")
-            spent = persisted.get("spent_usdt", 0.0)
-            max_price = persisted.get("max_price", entry_price)
-
-            if entry_price and spent > 0:
-                self.open_position_spent = spent
-                self._set_state(
-                    last_action="REHYDRATED_TRAILING",
-                    entry_price=entry_price,
-                    open_position_spent=spent,
-                    trailing_enabled=True,
-                    waiting_for_signal=False,
-                    waiting_for_confirmation=False,
-                    trailing_pct=trailing_pct,
-                    trailing_max_price=max_price,
-                    stop_price=(
-                        max_price * (1 - trailing_pct) if max_price is not None else None
-                    ),
-                )
-                logger.warning(
-                    "🔁 Rehydrated open position | symbol=%s | entry=%.4f | max=%.4f",
-                    self.config.symbol,
-                    entry_price,
-                    max_price or entry_price,
-                )
+            if (
+                self.state.trading_mode == TradingMode.LIVE
+                and self.binance is not None
+                and self.state.live_authorized
+            ):
+                self.rehydrate_open_position(persisted)
+            else:
+                self._set_state(last_action="RECOVERY_REQUIRED")
+                self._notify_recovery_required()
 
         if self.state.read_only:
             self._preload_metrics()
@@ -357,6 +371,9 @@ class Bot(Thread):
     # =========================
     def _trade_cycle(self):
         self._cycle_regime = None
+        if self.state.trading_mode == TradingMode.AI:
+            self._ai_cycle()
+            return
         self._update_read_only_state()
         if self._sleep_expired():
             self.apply_adaptive_state("NORMAL", reason="sleep_expired")
@@ -540,6 +557,189 @@ class Bot(Thread):
         # 5) BUY
         # =========================
         self._buy(trade_usdt)
+
+    def _ai_cycle(self) -> None:
+        self._maybe_generate_ai_recommendation()
+        time.sleep(5)
+
+    def _ai_snapshot_ready(self) -> bool:
+        started_at = self.state.ai_snapshot_started_at
+        if started_at is None:
+            return False
+        return time.time() - started_at >= AI_SNAPSHOT_WINDOW_SECONDS
+
+    def _maybe_generate_ai_recommendation(self) -> None:
+        if not self.state.ai_enabled:
+            return
+        if not self._ai_snapshot_ready():
+            return
+        last_decision_at = self.state.ai_last_decision_at or 0.0
+        if time.time() - last_decision_at < AI_RECOMMENDATION_TTL_SECONDS:
+            return
+        self._generate_ai_recommendation()
+
+    def _build_ai_snapshot(self) -> dict:
+        trades = []
+        if self.reporter is not None:
+            trades = self.reporter.get_recent_trades(
+                bot_id=self.config.bot_id,
+                limit=AI_MIN_TRADES,
+                side="SELL",
+            )
+        metrics = None
+        if self.adaptive_controller is not None:
+            metrics = self.adaptive_controller.compute_metrics(trades)
+
+        if metrics is not None:
+            self._set_state(
+                ai_trades_60m=metrics.total_trades,
+                ai_win_rate_60m=metrics.win_rate,
+                ai_avg_pnl_60m=metrics.avg_abs_pnl,
+                ai_max_drawdown_60m=metrics.drawdown_pct,
+            )
+
+        trend_strength = "unknown"
+        if metrics is not None and metrics.win_rate >= 0.6:
+            trend_strength = "strong"
+        elif metrics is not None and metrics.win_rate >= 0.45:
+            trend_strength = "moderate"
+        elif metrics is not None:
+            trend_strength = "weak"
+
+        return {
+            "volatility_pct": metrics.pnl_volatility_pct if metrics else None,
+            "avg_range_pct": metrics.avg_abs_pnl_pct if metrics else None,
+            "flip_rate": metrics.flip_rate if metrics else None,
+            "trend_strength": trend_strength,
+            "simulated_trades_count": metrics.total_trades if metrics else 0,
+            "simulated_win_rate": metrics.win_rate if metrics else 0.0,
+            "simulated_drawdown_pct": metrics.drawdown_pct if metrics else 0.0,
+            "asset": self.config.symbol,
+            "timeframe": self.config.kline_interval,
+        }
+
+    def _generate_ai_recommendation(self) -> None:
+        snapshot = self._build_ai_snapshot()
+        trades_count = snapshot.get("simulated_trades_count", 0) or 0
+        if trades_count < AI_MIN_TRADES:
+            recommendation = {
+                "market_regime": "DEAD",
+                "market_friendly": False,
+                "recommended_profile": "NO_TRADE",
+                "decision": "INSUFFICIENT_DATA",
+                "risk_level": "HIGH",
+                "confidence": 0.0,
+                "reasoning_tags": ["insufficient_data"],
+            }
+            self._set_state(
+                ai_recommendation={
+                    **recommendation,
+                },
+                ai_confidence=0.0,
+                ai_last_decision_at=time.time(),
+                ai_last_decision="INSUFFICIENT_DATA",
+                ai_last_reason="insufficient_data",
+                ai_blocked_by_ai=True,
+            )
+            self._send_ai_recommendation_message(recommendation)
+            return
+
+        client = HermesLLMClient()
+        try:
+            response = client.analyze_market(snapshot)
+            response = LLMGuard.validate(response)
+        except Exception as e:
+            logger.warning("AI recommendation failed: %s", e)
+            self._set_state(
+                ai_last_decision="ERROR",
+                ai_last_reason=str(e),
+                ai_last_decision_at=time.time(),
+            )
+            return
+
+        decision = response.get("decision")
+        confidence = response.get("confidence")
+        tags = response.get("reasoning_tags") or []
+        self._set_state(
+            ai_recommendation=response,
+            ai_confidence=confidence,
+            ai_last_decision_at=time.time(),
+            ai_last_decision=decision,
+            ai_last_reason=", ".join(tags) if tags else None,
+            ai_market_regime=response.get("market_regime"),
+            ai_regime_confidence=confidence,
+            ai_blocked_by_ai=(decision != "ENABLE_TRADING")
+            or (confidence is not None and confidence < AI_MIN_CONFIDENCE),
+        )
+        self._send_ai_recommendation_message(response)
+
+    def _send_ai_recommendation_message(self, recommendation: dict) -> None:
+        if self.notifier is None:
+            return
+        if self.state.ai_pending_recommendation:
+            return
+
+        rec_id = str(int(time.time()))
+        market_regime = recommendation.get("market_regime", "—")
+        risk_level = recommendation.get("risk_level", "—")
+        profile = recommendation.get("recommended_profile", "—")
+        decision = recommendation.get("decision", "—")
+        confidence = recommendation.get("confidence")
+        confidence_pct = "—"
+        if isinstance(confidence, (int, float)):
+            confidence_pct = f"{confidence * 100:.0f} %"
+
+        tags = recommendation.get("reasoning_tags") or []
+        reasons = "\n".join([f"• {tag}" for tag in tags]) if tags else "—"
+
+        text = (
+            "🤖 <b>Hermes AI — Análisis de mercado</b>\n\n"
+            f"Símbolo: <code>{self.config.symbol}</code>\n"
+            f"Régimen detectado: {market_regime}\n"
+            f"Confianza: {confidence_pct}\n\n"
+            "📌 <b>Recomendación</b>\n"
+            f"• Perfil sugerido: {profile}\n"
+            f"• Riesgo: {risk_level}\n"
+            f"• Acción: {decision}\n"
+            f"• Motivo: {reasons}\n\n"
+            "¿Qué deseas hacer?"
+        )
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "✅ Aceptar recomendación",
+                        callback_data=f"ai_accept:{self.config.symbol}:{rec_id}",
+                    ),
+                    InlineKeyboardButton(
+                        "❌ Seguir observando",
+                        callback_data=f"ai_reject:{self.config.symbol}:{rec_id}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⚠️ Override (alto riesgo)",
+                        callback_data=f"ai_override_prompt:{self.config.symbol}:{rec_id}",
+                    ),
+                ],
+            ]
+        )
+
+        message_id = self.notifier.send_ephemeral_sync(
+            text=text,
+            delete_after=0,
+            silent=False,
+            reply_markup=keyboard,
+        )
+        if message_id is None:
+            return
+
+        self._set_state(
+            ai_pending_recommendation=True,
+            ai_last_recommendation_id=rec_id,
+            ai_last_recommendation_message_id=message_id,
+        )
 
     # =========================
     # Vortex simulation (paper)
@@ -827,6 +1027,84 @@ class Bot(Thread):
         ):
             raise RuntimeError("🚫 Binance access blocked: not authorized LIVE mode")
 
+    def _require_live_or_protect_position(self) -> None:
+        if self.open_position_spent > 0 and self.binance is not None:
+            if self.state.trading_mode != TradingMode.LIVE or not self.state.live_authorized:
+                logger.warning(
+                    "⚠️ Protective access granted outside LIVE mode | symbol=%s | mode=%s",
+                    self.config.symbol,
+                    self.state.trading_mode,
+                )
+            return
+        self._require_live()
+
+    def rehydrate_open_position(self, persisted: dict | None = None) -> bool:
+        if persisted is None:
+            persisted = load_state(self.config.symbol)
+        if not persisted or not persisted.get("in_position"):
+            return False
+
+        trailing_pct = persisted.get("trailing_pct", self.config.trailing_pct)
+        entry_price = persisted.get("entry_price")
+        spent = persisted.get("spent_usdt", 0.0)
+        max_price = persisted.get("max_price", entry_price)
+
+        if entry_price and spent > 0:
+            self.open_position_spent = spent
+            self._set_state(
+                last_action="REHYDRATED_TRAILING",
+                entry_price=entry_price,
+                open_position_spent=spent,
+                trailing_enabled=True,
+                waiting_for_signal=False,
+                waiting_for_confirmation=False,
+                trailing_pct=trailing_pct,
+                trailing_max_price=max_price,
+                stop_price=(
+                    max_price * (1 - trailing_pct) if max_price is not None else None
+                ),
+            )
+            logger.warning(
+                "🔁 Rehydrated open position | symbol=%s | entry=%.4f | max=%.4f",
+                self.config.symbol,
+                entry_price,
+                max_price or entry_price,
+            )
+            return True
+
+        return False
+
+    def _notify_recovery_required(self) -> None:
+        if self.notifier is None:
+            return
+
+        text = (
+            "⚠️ <b>RECOVERY REQUIRED</b>\n\n"
+            "Detected an open position, but LIVE authorization is missing.\n"
+            "Do you want to authorize LIVE access to close it?"
+        )
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "✅ Authorize close",
+                        callback_data=f"recovery_enable:{self.config.symbol}",
+                    ),
+                    InlineKeyboardButton(
+                        "❌ Keep AI mode",
+                        callback_data=f"recovery_ignore:{self.config.symbol}",
+                    ),
+                ]
+            ]
+        )
+
+        self.notifier.send_ephemeral_sync(
+            text=text,
+            delete_after=0,
+            silent=False,
+            reply_markup=keyboard,
+        )
+
     def _compute_velocity(self, prices: list[float], n: int = 5) -> float:
         if len(prices) < n + 1:
             return 0.0
@@ -942,7 +1220,7 @@ class Bot(Thread):
         return trade_usdt
 
     def _manage_open_position(self):
-        self._require_live()
+        self._require_live_or_protect_position()
         last_saved_max = {"value": self.state.trailing_max_price}
 
         def _update_trailing_state(snapshot: dict[str, float]) -> None:
@@ -993,6 +1271,19 @@ class Bot(Thread):
             waiting_for_signal=False,
             waiting_for_confirmation=False,
         )
+        if self.state.read_only_reason == "recovery_close_only":
+            self.binance = None
+            self._set_state(
+                trading_mode=TradingMode.AI,
+                live_authorized=False,
+                live_authorized_at=None,
+                read_only=False,
+                read_only_until=None,
+                read_only_reason=None,
+                ai_enabled=True,
+                ai_snapshot_started_at=time.time(),
+                ai_mode="ADM",
+            )
         exec_qty = float(order.get("executedQty", 0.0))
         avg_price = received / exec_qty if exec_qty else 0.0
         if self.reporter is not None:

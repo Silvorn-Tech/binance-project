@@ -15,7 +15,8 @@ dependencies = [
   "python-telegram-bot>=20.7",
   "python-telegram-bot[job-queue]>=20.7",
   "sqlalchemy>=2.0",
-  "pymysql>=1.1.0"
+  "pymysql>=1.1.0",
+  "ollama>=0.3.0"
 ]
 
 # =========================
@@ -33,3 +34,6 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["hermes", "hermes.*"]
+
+[tool.setuptools.package-data]
+"hermes.ai" = ["prompts/*.txt", "prompts/*.json", "prompts/README.md"]

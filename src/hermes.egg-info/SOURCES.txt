@@ -11,9 +11,14 @@ src/hermes.egg-info/top_level.txt
 src/hermes/ai/__init__.py
 src/hermes/ai/conviction_model.py
 src/hermes/ai/features.py
+src/hermes/ai/llm_client.py
+src/hermes/ai/llm_guard.py
 src/hermes/ai/profile_model.py
 src/hermes/ai/regime_classifier.py
 src/hermes/ai/types.py
+src/hermes/ai/prompts/README.md
+src/hermes/ai/prompts/hermes_core_v1.meta.json
+src/hermes/ai/prompts/hermes_core_v1.txt
 src/hermes/config/bot_config_store.py
 src/hermes/persistence/__init__.py
 src/hermes/persistence/db.py
@@ -22,6 +27,7 @@ src/hermes/providers/Telegram.py
 src/hermes/providers/__init__.py
 src/hermes/providers/binance.py
 src/hermes/providers/market_data.py
+src/hermes/reporting/post_mortem_audit.py
 src/hermes/reporting/trade_reporter.py
 src/hermes/reports/daily_recorder.py
 src/hermes/reports/report_manager.py
