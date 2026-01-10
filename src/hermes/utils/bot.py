@@ -580,12 +580,23 @@ class Bot(Thread):
 
     def _build_ai_snapshot(self) -> dict:
         trades = []
+        trade_history: list[dict] = []
         if self.reporter is not None:
-            trades = self.reporter.get_recent_trades(
+            since_ts = time.time() - AI_SNAPSHOT_WINDOW_SECONDS
+            trades = self.reporter.get_trades_since(
                 bot_id=self.config.bot_id,
-                limit=AI_MIN_TRADES,
+                since_ts=since_ts,
                 side="SELL",
             )
+            if len(trades) > 200:
+                trades = trades[-200:]
+            trade_history = self.reporter.get_trades_since(
+                bot_id=self.config.bot_id,
+                since_ts=since_ts,
+                side=None,
+            )
+            if len(trade_history) > 200:
+                trade_history = trade_history[-200:]
         metrics = None
         if self.adaptive_controller is not None:
             metrics = self.adaptive_controller.compute_metrics(trades)
@@ -616,6 +627,7 @@ class Bot(Thread):
             "simulated_drawdown_pct": metrics.drawdown_pct if metrics else 0.0,
             "asset": self.config.symbol,
             "timeframe": self.config.kline_interval,
+            "trade_history": trade_history,
         }
 
     def _generate_ai_recommendation(self) -> None:

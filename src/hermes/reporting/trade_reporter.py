@@ -87,6 +87,43 @@ class TradeReporter:
 
         return list(rows)
 
+    def get_trades_since(
+        self,
+        *,
+        bot_id: str,
+        since_ts: float,
+        side: str | None = None,
+    ) -> list[dict]:
+        if not self.file_path.exists():
+            return []
+
+        results: list[dict] = []
+        with self.file_path.open("r", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get("bot_id") != bot_id:
+                    continue
+                if side and row.get("side") != side:
+                    continue
+                ts_value = self._parse_timestamp(row.get("timestamp"))
+                if ts_value is None or ts_value < since_ts:
+                    continue
+                results.append(row)
+
+        return results
+
+    def _parse_timestamp(self, value: str | None) -> float | None:
+        if not value:
+            return None
+        try:
+            cleaned = value.replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(cleaned)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+
     def get_last_trades(
         self,
         *,

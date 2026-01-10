@@ -10,6 +10,8 @@ from loguru import logger
 
 from hermes.utils.trading_mode import TradingMode
 
+AI_SNAPSHOT_WINDOW_SECONDS = 60 * 60
+
 QUIET_ACTIONS = {"WAIT_SIGNAL", "ARM_INIT", "WAIT_CONFIRMATION", "WAITING_CONFIRMATION"}
 MIN_EDIT_INTERVAL_SECONDS = 30
 
@@ -203,6 +205,7 @@ class TelegramNotifier:
             "",
             "──────── <b>AI / ANALYSIS</b> ────────",
             f"<b>AI mode:</b> {state.ai_mode or '—'}",
+            f"<b>AI window remaining:</b> {self._ai_window_remaining(state)}",
             f"<b>Market regime:</b> {state.ai_market_regime or '—'}",
             f"<b>Regime confidence:</b> {fmt(state.ai_regime_confidence)}",
             f"<b>AI confidence:</b> {fmt(state.ai_confidence)}",
@@ -240,6 +243,15 @@ class TelegramNotifier:
         )
 
         return "\n".join(lines)
+
+    def _ai_window_remaining(self, state) -> str:
+        started_at = getattr(state, "ai_snapshot_started_at", None)
+        if not started_at:
+            return "—"
+        remaining = max(AI_SNAPSHOT_WINDOW_SECONDS - (time.time() - started_at), 0.0)
+        minutes = int(remaining // 60)
+        seconds = int(remaining % 60)
+        return f"{minutes:02d}:{seconds:02d}"
 
     # =========================
     # Dashboard keyboard  ✅ FIX

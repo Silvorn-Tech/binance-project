@@ -141,6 +141,7 @@ You will receive a JSON object with:
 - simulated_drawdown_pct
 - asset
 - timeframe
+- trade_history (array of trade-report rows for context)
 
 
 ⚠️ If simulated_trades_count < 20 → INSUFFICIENT_DATA
