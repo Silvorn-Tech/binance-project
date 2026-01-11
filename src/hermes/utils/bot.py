@@ -561,6 +561,7 @@ class Bot(Thread):
 
     def _ai_cycle(self) -> None:
         self._update_market_snapshot()
+        self._refresh_ai_window_metrics()
         self._maybe_generate_ai_recommendation()
         time.sleep(5)
 
@@ -601,6 +602,39 @@ class Bot(Thread):
             return False
         return time.time() - started_at >= AI_SNAPSHOT_WINDOW_SECONDS
 
+    def _refresh_ai_window_metrics(self) -> None:
+        if self.reporter is None or self.adaptive_controller is None:
+            return
+
+        since_ts = time.time() - AI_SNAPSHOT_WINDOW_SECONDS
+        trades = self.reporter.get_trades_since(
+            bot_id=self.config.bot_id,
+            since_ts=since_ts,
+            side="SELL",
+        )
+        if len(trades) > 200:
+            trades = trades[-200:]
+
+        metrics = self.adaptive_controller.compute_metrics(trades)
+        if metrics.total_trades <= 0:
+            self._set_state(
+                ai_trades_60m=metrics.total_trades,
+                ai_win_rate_60m=0.0,
+                ai_avg_pnl_60m=0.0,
+                ai_max_drawdown_60m=0.0,
+                ai_score_60m=0.0,
+            )
+            return
+
+        ai_score = self._compute_ai_score(metrics)
+        self._set_state(
+            ai_trades_60m=metrics.total_trades,
+            ai_win_rate_60m=metrics.win_rate,
+            ai_avg_pnl_60m=metrics.avg_abs_pnl,
+            ai_max_drawdown_60m=metrics.drawdown_pct,
+            ai_score_60m=ai_score,
+        )
+
     def _maybe_generate_ai_recommendation(self) -> None:
         if not self.state.ai_enabled:
             return
@@ -635,14 +669,23 @@ class Bot(Thread):
             metrics = self.adaptive_controller.compute_metrics(trades)
 
         if metrics is not None:
-            ai_score = self._compute_ai_score(metrics)
-            self._set_state(
-                ai_trades_60m=metrics.total_trades,
-                ai_win_rate_60m=metrics.win_rate,
-                ai_avg_pnl_60m=metrics.avg_abs_pnl,
-                ai_max_drawdown_60m=metrics.drawdown_pct,
-                ai_score_60m=ai_score,
-            )
+            if metrics.total_trades <= 0:
+                self._set_state(
+                    ai_trades_60m=metrics.total_trades,
+                    ai_win_rate_60m=0.0,
+                    ai_avg_pnl_60m=0.0,
+                    ai_max_drawdown_60m=0.0,
+                    ai_score_60m=0.0,
+                )
+            else:
+                ai_score = self._compute_ai_score(metrics)
+                self._set_state(
+                    ai_trades_60m=metrics.total_trades,
+                    ai_win_rate_60m=metrics.win_rate,
+                    ai_avg_pnl_60m=metrics.avg_abs_pnl,
+                    ai_max_drawdown_60m=metrics.drawdown_pct,
+                    ai_score_60m=ai_score,
+                )
 
         trend_strength = "unknown"
         if metrics is not None and metrics.win_rate >= 0.6:
